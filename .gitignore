@@ -1,0 +1,53 @@
+CLAUDE.md
+
+# Local environment overrides
+.env
+.env.*
+
+# eval/baseline.json is committed on purpose: it is the regression reference
+# that `eval/run.py --baseline` compares against.
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Python environments
+.python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage / test reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging / build artifacts
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebooks
+.ipynb_checkpoints/
+
+/content/images/
