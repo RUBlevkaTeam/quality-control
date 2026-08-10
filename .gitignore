@@ -50,4 +50,4 @@ pip-wheel-metadata/
 # Notebooks
 .ipynb_checkpoints/
 
-/content/images/
+/content/content_ecup/images/
