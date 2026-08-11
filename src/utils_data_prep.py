@@ -79,7 +79,6 @@ def prepare_dataframe(data_path: str | Path, images_path: str | Path) -> pd.Data
             current_df[column] = ""
 
     current_df["text"] = _build_text_vectorized(current_df)
-    current_df["rule_text"] = _build_rule_text_vectorized(current_df)
     current_df["image_paths"] = _find_images_vectorized(current_df, Path(images_path))
     current_df["n_images"] = current_df["image_paths"].map(len)
 
