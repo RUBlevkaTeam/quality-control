@@ -24,8 +24,8 @@ MODEL_LLM_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3.5-4B")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Product quality predictor submit pipeline")
-    parser.add_argument("--test_data_path", type=str, help="test data path")
-    parser.add_argument("--output_path", type=str, help="output file")
+    parser.add_argument("--test_data_path", "-i", type=str, help="test data path")
+    parser.add_argument("--output_path", "--output-path", "-o", type=str, help="output file")
     args = parser.parse_args()
 
     # Step 1: read and prepare combined text + structured image paths
