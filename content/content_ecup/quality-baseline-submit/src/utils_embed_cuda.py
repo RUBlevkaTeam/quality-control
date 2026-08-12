@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModel
+from pathlib import Path
 
 from src.constants import PIXEL_PRESETS
 
@@ -90,32 +91,36 @@ def embed_data_cuda(
     max_pixels: int = 128 * 28 * 28,
     batch_size: int = 128,
 ) -> np.ndarray:
-   
-    # Aggressively free memory before loading model
-    torch.cuda.empty_cache()
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    def _resolve_device_and_dtype():
+        if torch.cuda.is_available():
+            return torch.device("cuda"), torch.bfloat16
+
+        if torch.backends.mps.is_available():
+            return torch.device("mps"), torch.float16
+
+        return torch.device("cpu"), torch.float32
+
+    device, dtype = _resolve_device_and_dtype()
 
     # Load model once
-    _is_local = os.path.exists(embed_model_path) or (
-        os.path.isabs(embed_model_path) and not embed_model_path.startswith(("http://", "https://", "file://"))
+    model_path = Path(embed_model_path)
+
+    if not model_path.is_dir():
+        raise FileNotFoundError(
+            f"Embedding model not found: {model_path}"
+        )
+
+
+    processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
+    model = AutoModel.from_pretrained(
+        embed_model_path, torch_dtype=dtype, local_files_only=True, trust_remote_code=True
     )
-    if _is_local:
-        processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
-        model = AutoModel.from_pretrained(
-            embed_model_path, torch_dtype=torch.float16, local_files_only=True, trust_remote_code=True
-        )
-    else:
-        processor = AutoProcessor.from_pretrained(embed_model_path)
-        model = AutoModel.from_pretrained(
-            embed_model_path, torch_dtype=torch.float16, trust_remote_code=True
-        )
+
     model = model.to(device).eval()
 
     n = len(df)
-    all_embeddings = np.zeros((n, 0), dtype=np.float32)
+    embedding_batches = []
 
     # Process in batches — true parallel inference
     for start in range(0, n, batch_size):
@@ -123,9 +128,7 @@ def embed_data_cuda(
         batch_df = df.iloc[start:end].reset_index(drop=True)
 
         # Determine which samples have images and which don't
-        has_images_mask = batch_df['image_paths'].apply(
-            lambda x: bool(x and len(x) > 0)
-        )
+        has_images_mask = batch_df['image_paths'].map(bool)
         num_with_images = has_images_mask.sum()
 
         # Separate into two groups

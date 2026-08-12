@@ -19,7 +19,7 @@ class ProductQualityPredictor:
             X = np.vstack(cat_train['embedding'].values)
             y = cat_train['label'].values
             
-            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
             clf = LogisticRegression(max_iter=1000, class_weight='balanced')
             clf.fit(X_train, y_train)
             

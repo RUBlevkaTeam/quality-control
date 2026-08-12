@@ -11,19 +11,21 @@ _VALID_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
 # Vectorized text construction
 def _build_text_vectorized(df: pd.DataFrame) -> pd.Series:
 
+    # строим колонку text
     return (
-        'Название: ' + df['name'].astype(str) + '\n'
-        'Категория: ' + df['category'].astype(str) + '\n'
-        'Описание: ' + df['description'].astype(str)
+        'Название: ' + df['name'].fillna('').astype(str) + '\n'
+        'Категория: ' + df['category'].fillna('').astype(str) + '\n'
+        'Описание: ' + df['description'].fillna('').astype(str)
     )
 
-# Find valid image files for a single product id
+
 def _find_images_for_id(id_val, images_path: Path) -> List[str]:
-    
+
+    # проверяем корректность изображений
     img_dir = images_path / str(id_val)
     if not img_dir.exists():
         return []
-    return [str(img_dir / f) for f in sorted(img_dir.iterdir())
+    return [str(f) for f in sorted(img_dir.iterdir())
             if Path(f).suffix.lower() in _VALID_EXTENSIONS]
 
 # Vectorized image path discovery based on  id column

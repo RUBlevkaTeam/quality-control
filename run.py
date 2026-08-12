@@ -13,24 +13,58 @@ from src.utils_postprocess import format_results
 from src.utils_embed_cuda import embed_data_cuda
 from src.utils_generate_cuda import generate_comments_cuda
 
-# Classifier artifact path — Docker mounts artifacts at /app/artifacts/
-CLASSIFIER_PATH = "baseline_qwen3vl_bf16.joblib"
+PROJECT_DIR = Path(__file__).resolve().parent
+CLASSIFIER_PATH = PROJECT_DIR / "baseline_qwen3vl_bf16.joblib" # директория классификатора
 
 # Models path: match evaluator's SHARED_MODELS_PATH convention
-_SHARED_MODELS_DIR = os.environ.get("SHARED_MODELS_PATH", "/shared_models")
-MODEL_EMBED_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3-VL-Embedding-2B")
-MODEL_LLM_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3.5-4B")
+_SHARED_MODELS_DIR = os.environ.get("SHARED_MODELS_PATH", "/shared_models") # директория модели
+MODEL_EMBED_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3-VL-Embedding-2B") # директория эмбендинга
+MODEL_LLM_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3.5-4B") # директория ллмки
 
+for model_path in (MODEL_EMBED_PATH, MODEL_LLM_PATH):
+    if not Path(model_path).is_dir():
+        raise FileNotFoundError(
+            f"Model directory not found: {model_path}. "
+            "Set SHARED_MODELS_PATH correctly."
+        )
 
 def main() -> None:
+
+    # передаем из терминала расположение тестовых данных и выхода как пути
     parser = argparse.ArgumentParser(description="Product quality predictor submit pipeline")
-    parser.add_argument("--test_data_path", type=str, help="test data path")
-    parser.add_argument("--output_path", type=str, help="output file")
+    parser.add_argument(
+        "-i",
+        "--test_data_path",
+        required=True,
+        type=Path,
+        dest="test_data_path",
+        help="Path to input test CSV",
+)
+
+    parser.add_argument(
+        "-o",
+        "--output-path",
+        "--output_path",
+        required=True,
+        type=Path,
+        dest="output_path",
+        help="Path to output submission CSV",
+    )
+
     args = parser.parse_args()
 
-    # Step 1: read and prepare combined text + structured image paths
-    data_path = Path(args.test_data_path)
+    # готовим пути
+    data_path = args.test_data_path
+    output_path = args.output_path
     images_path = data_path.parent / "images"
+
+    if not data_path.is_file():
+        parser.error(f"Input CSV not found: {data_path}")
+
+    if not images_path.is_dir():
+        parser.error(f"Images directory not found: {images_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     current_df = prepare_dataframe(data_path, images_path)
 
     # Step 2: extract embeddings for text+images (batch_size=128 for H100 80GB)
@@ -39,12 +73,11 @@ def main() -> None:
         max_pixels=PIXEL_PRESETS["M"],
         batch_size=DEFAULT_EMBED_BATCH_SIZE,
     )
-    current_df['embedding'] = current_embeddings.tolist()
 
     # Step 3: load classification models and predict
     trained_logreg = ProductQualityPredictor.load(CLASSIFIER_PATH)
     current_df['logreg_prob'], current_df['pred'] = trained_logreg.predict(
-        current_df['embedding'], current_df['category']
+        current_embeddings, current_df['category']
     )
 
     # Step 4: generate comments
