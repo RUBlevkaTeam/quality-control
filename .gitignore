@@ -50,6 +50,11 @@ pip-wheel-metadata/
 # Notebooks
 .ipynb_checkpoints/
 /experiments/artifacts/
+/artifacts/
+/reports/
+/cache/
+/wandb/
+/models/
 
 /content/content_ecup/images/
 /content/useful/

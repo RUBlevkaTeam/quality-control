@@ -1,32 +1,19 @@
 import argparse
 import os
-import sys
 from pathlib import Path
-
-import pandas as pd
-import numpy as np
 
 from src.constants import PIXEL_PRESETS, DEFAULT_EMBED_BATCH_SIZE, DEFAULT_LLM_BATCH_SIZE
 from src.utils_data_prep import prepare_dataframe
 from src.utils_logreg import ProductQualityPredictor
 from src.utils_postprocess import format_results
-from src.utils_embed_cuda import embed_data_cuda
-from src.utils_generate_cuda import generate_comments_cuda
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CLASSIFIER_PATH = PROJECT_DIR / "baseline_qwen3vl_bf16.joblib" # директория классификатора
 
 # Models path: match evaluator's SHARED_MODELS_PATH convention
-_SHARED_MODELS_DIR = os.environ.get("SHARED_MODELS_PATH", "/shared_models") # директория модели
-MODEL_EMBED_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3-VL-Embedding-2B") # директория эмбендинга
-MODEL_LLM_PATH = os.path.join(_SHARED_MODELS_DIR, "Qwen/Qwen3.5-4B") # директория ллмки
-
-for model_path in (MODEL_EMBED_PATH, MODEL_LLM_PATH):
-    if not Path(model_path).is_dir():
-        raise FileNotFoundError(
-            f"Model directory not found: {model_path}. "
-            "Set SHARED_MODELS_PATH correctly."
-        )
+_SHARED_MODELS_DIR = Path(os.environ.get("SHARED_MODELS_PATH", "/shared_models"))
+MODEL_EMBED_PATH = _SHARED_MODELS_DIR / "Qwen/Qwen3-VL-Embedding-2B"
+MODEL_LLM_PATH = _SHARED_MODELS_DIR / "Qwen/Qwen3.5-4B"
 
 def main() -> None:
 
@@ -35,6 +22,7 @@ def main() -> None:
     parser.add_argument(
         "-i",
         "--test_data_path",
+        "--test-data-path",
         required=True,
         type=Path,
         dest="test_data_path",
@@ -53,6 +41,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Heavy GPU dependencies are imported only for a real inference run. This keeps
+    # `run.py --help` usable in the lightweight local experiment environment.
+    from src.utils_embed_cuda import embed_data_cuda
+    from src.utils_generate_cuda import generate_comments_cuda
+
     # готовим пути
     data_path = args.test_data_path
     output_path = args.output_path
@@ -64,12 +57,20 @@ def main() -> None:
     if not images_path.is_dir():
         parser.error(f"Images directory not found: {images_path}")
 
+    for model_path in (MODEL_EMBED_PATH, MODEL_LLM_PATH):
+        if not model_path.is_dir():
+            parser.error(
+                f"Model directory not found: {model_path}. Set SHARED_MODELS_PATH correctly."
+            )
+    if not CLASSIFIER_PATH.is_file():
+        parser.error(f"Classifier artifact not found: {CLASSIFIER_PATH}")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     current_df = prepare_dataframe(data_path, images_path)
 
     # Step 2: extract embeddings for text+images (batch_size=128 for H100 80GB)
     current_embeddings = embed_data_cuda(
-        MODEL_EMBED_PATH, current_df,
+        str(MODEL_EMBED_PATH), current_df,
         max_pixels=PIXEL_PRESETS["M"],
         batch_size=DEFAULT_EMBED_BATCH_SIZE,
     )
@@ -82,7 +83,7 @@ def main() -> None:
 
     # Step 4: generate comments
     comments = generate_comments_cuda(
-        MODEL_LLM_PATH, current_df,
+        str(MODEL_LLM_PATH), current_df,
         batch_size=DEFAULT_LLM_BATCH_SIZE,
     )
 

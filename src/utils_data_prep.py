@@ -26,7 +26,7 @@ def _find_images_for_id(id_val, images_path: Path) -> List[str]:
     if not img_dir.exists():
         return []
     return [str(f) for f in sorted(img_dir.iterdir())
-            if Path(f).suffix.lower() in _VALID_EXTENSIONS]
+            if f.is_file() and f.suffix.lower() in _VALID_EXTENSIONS]
 
 # Vectorized image path discovery based on  id column
 def _find_images_vectorized(df: pd.DataFrame, images_path: Path) -> pd.Series:
@@ -38,6 +38,15 @@ def prepare_dataframe(data_path: str, images_path: str) -> pd.DataFrame:
     
     current_df = pd.read_csv(data_path)
     img_dir = Path(images_path)
+
+    junk = [column for column in current_df.columns if str(column).startswith('Unnamed:')]
+    if junk:
+        current_df = current_df.drop(columns=junk)
+    if 'id' not in current_df.columns:
+        raise ValueError(f"input CSV must contain id; got {list(current_df.columns)}")
+    for column in ('name', 'category', 'description'):
+        if column not in current_df.columns:
+            current_df[column] = ''
 
     # Vectorized text construction
     current_df['text'] = _build_text_vectorized(current_df)

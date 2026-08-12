@@ -88,16 +88,32 @@ def embed_data_cuda(
     df: pd.DataFrame,
     max_pixels: int = 128 * 28 * 28,
     batch_size: int = 128,
+    requested_device: str = "auto",
 ) -> np.ndarray:
    
     def _resolve_device_and_dtype():
-        if torch.cuda.is_available():
+        if requested_device not in {"auto", "cuda", "mps", "cpu"}:
+            raise ValueError(f"unsupported device: {requested_device}")
+        if requested_device in {"auto", "cuda"} and torch.cuda.is_available():
             return torch.device("cuda"), torch.bfloat16
 
-        if torch.backends.mps.is_available():
+        if requested_device in {"auto", "mps"} and torch.backends.mps.is_available():
             return torch.device("mps"), torch.float16
 
+        if requested_device != "auto" and requested_device != "cpu":
+            raise RuntimeError(
+                f"requested device {requested_device!r} is not available in this PyTorch build"
+            )
         return torch.device("cpu"), torch.float32
+
+    def _empty_device_cache() -> None:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
+
+    def _is_oom(error: RuntimeError) -> bool:
+        return isinstance(error, torch.OutOfMemoryError) or "out of memory" in str(error).lower()
 
     device, dtype = _resolve_device_and_dtype()
 
@@ -116,7 +132,7 @@ def embed_data_cuda(
     model = model.to(device).eval()
 
     n = len(df)
-    all_embeddings = []
+    all_embeddings: List[np.ndarray] = []
     # Process in batches — true parallel inference
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
@@ -156,9 +172,11 @@ def embed_data_cuda(
                         processor, model, texts_with_imgs, all_images, device
                     )
                     emb_with_list = list(emb_with)
-                except torch.cuda.OutOfMemoryError:
+                except RuntimeError as error:
+                    if not _is_oom(error):
+                        raise
                     # Обработка индивидуально при исключении по ООМ
-                    torch.cuda.empty_cache()
+                    _empty_device_cache()
                     emb_with_list = []
                     for idx in range(len(df_with_imgs)):
                         single_imgs = all_images[idx]
@@ -170,9 +188,11 @@ def embed_data_cuda(
                                 device,
                             )
                             emb_with_list.append(single_emb[0])
-                        except torch.cuda.OutOfMemoryError:
+                        except RuntimeError as error:
+                            if not _is_oom(error):
+                                raise
                             # Обработка 2 исключения по ООМ без фото
-                            torch.cuda.empty_cache()
+                            _empty_device_cache()
                             single_emb = _embed_batch_text_only(
                                 processor, model,
                                 [texts_with_imgs[idx]],
@@ -204,17 +224,18 @@ def embed_data_cuda(
         batch_result = np.stack(batch_result_rows)
 
         # накапливаем результаты
-        if len(all_embeddings) == 0:
-            all_embeddings = batch_result.copy()
-        else:
-            all_embeddings.append(batch_result)
+        all_embeddings.append(batch_result)
 
-    all_embeddings = np.vstack(all_embeddings)
+    if not all_embeddings:
+        return np.empty((0, 0), dtype=np.float32)
+    embeddings = np.vstack(all_embeddings)
 
     del model, processor
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
 
-    return all_embeddings
+    return embeddings
