@@ -49,6 +49,13 @@ pip-wheel-metadata/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# Local ML artifacts and experiment outputs
+/artifacts/
+/cache/
+/models/
+/reports/
+/wandb/
 /experiments/artifacts/
 
 /content/content_ecup/images/
