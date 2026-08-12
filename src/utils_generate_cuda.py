@@ -1,159 +1,129 @@
+"""Grounded Qwen3.5 comment rewriting with deterministic fallbacks."""
+
+from __future__ import annotations
+
 import gc
-import os
-from typing import List
-
-import numpy as np
-import pandas as pd
 import re
+from typing import Sequence
+
+import pandas as pd
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-# Helper to tokenize a batch of prompts and generate comments in one pass
-def _generate_batch(
-    model,
-    tokenizer,
-    prompts_list: List[str],
-    max_new_tokens: int,
-    do_sample: bool,
-) -> List[str]:
-    
-    encoded = tokenizer(
-        prompts_list,
-        padding=True,
-        truncation=True,
-        return_tensors="pt",
-    ).to(model.device)
-
-    pad_token_id = model.config.pad_token_id or tokenizer.pad_token_id or 151643
-
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=encoded['input_ids'],
-            attention_mask=encoded['attention_mask'],
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            pad_token_id=pad_token_id,
-            use_cache=True,
-        )
-
-    input_length = encoded['input_ids'].shape[1]
-    comments = []
-    for out in outputs:
-        generated_tokens = out[input_length:]
-        raw_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        comments.append(_clean_output(raw_text))
-    return comments
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"</?(?:комментарий|вердикт|rationale)>", re.IGNORECASE)
+_SPACE_RE = re.compile(r"\s+")
 
 
-_SYSTEM_PROMPT = (
-    "You are a helpful product analyst. Be concise and strictly follow formatting instructions. "
-    "Do NOT output any thinking process, reasoning, or thinking tags. Output only the final answer."
-)
-
-_USER_PROMPT_TEMPLATE = (
-    "Перед нами {pred_label} продукт в онлайн магазине.\n"
-    "Описание продукта: {text}\n\n"
-    "Напиши краткое объяснение почему этот продукт {pred_label_lower} за 30 слов или короче. "
-    "Используй русский язык."
-)
-
-
-# Helper to build chat template prompt for a single sample
-def _build_prompt(text: str, logreg_prob: float, tokenizer) -> str:
-    
-    pred_label = "хороший" if logreg_prob >= 0.5 else "плохой"
-    pred_label_lower = pred_label.lower()
-
-    user_text = _USER_PROMPT_TEMPLATE.format(
-        pred_label=pred_label,
-        pred_label_lower=pred_label_lower,
-        text=text,
-    )
-
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
-
-    try:
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-        )
-    except TypeError:
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    return prompt
-
-
-# Strip reasoning tags and extract <rationale> content if present
-def _clean_output(raw: str) -> str:
-    
-    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    if "<rationale>" in text:
-        match = re.search(r"<rationale>(.*?)</rationale>", text, re.DOTALL)
-        if match:
-            text = match.group(1).strip()
+def _clean_generated(raw: object) -> str:
+    text = _THINK_RE.sub(" ", str(raw or ""))
+    text = _TAG_RE.sub(" ", text)
+    text = _SPACE_RE.sub(" ", text).strip().strip('"«»')
     return text
 
 
-# Load LLM model and generate comments with batched inference
-def generate_comments_cuda(
-    llm_model_path: str,
-    df: pd.DataFrame,
+def _prompt(
+    tokenizer,
+    *,
+    row,
+    prediction: int,
+    variants: Sequence[str],
+) -> str:
+    verdict = "не бан" if int(prediction) == 1 else "бан"
+    product_text = str(row.get("text", ""))[:2400]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты выбираешь более ясную формулировку готового объяснения. "
+                "Вердикт и факты менять нельзя. Ответь строго одной ASCII-буквой A или B."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Категория: {row.get('category', '')}\n"
+                f"Фиксированный вердикт: {verdict}\n"
+                f"Карточка: {product_text}\n"
+                f"A: {variants[0]}\n"
+                f"B: {variants[1]}\n"
+                "Выбери более ясный вариант. Только A или B."
+            ),
+        },
+    ]
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+
+def generate_grounded_comments_cuda(
+    model_path: str,
+    dataframe: pd.DataFrame,
+    predictions: Sequence[int],
+    comment_variants: Sequence[Sequence[str]],
+    *,
     batch_size: int = 64,
-    max_new_tokens: int = 120,
-    do_sample: bool = False,
-) -> List[str]:
-    
-    _is_local = os.path.exists(llm_model_path) or (
-        os.path.isabs(llm_model_path) and not llm_model_path.startswith(("http://", "https://", "file://"))
-    )
+    max_new_tokens: int = 4,
+) -> list[str]:
+    if not (len(dataframe) == len(predictions) == len(comment_variants)):
+        raise ValueError("comment generation inputs must align")
+    if len(dataframe) == 0:
+        return []
 
-    if _is_local:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            local_files_only=True,
-            trust_remote_code=True,
-            device_map="auto",
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            device_map="auto",
-        )
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.float16,
+        local_files_only=True,
+        trust_remote_code=True,
+        device_map="auto",
+    ).eval()
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    model.eval()
-    n = len(df)
-    comments: List[str] = []
-
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        batch_df = df.iloc[start:end]
-
-        # Collect prompts
-        prompts_list = []
-        for _, row in batch_df.iterrows():
-            text = row.get('text', '') or ''
-            # Do we tweak it? Tinker with it and maybe the score improves :idk:
-            prob = row.get('pred', 0.0) if hasattr(row, 'pred') else 0.0
-            prompts_list.append(_build_prompt(text, prob, tokenizer))
-
-        # Generate in one batch call
-        batch_comments = _generate_batch(
-            model, tokenizer, prompts_list,
-            max_new_tokens, do_sample
-        )
-        comments.extend(batch_comments)
+    generated: list[str] = []
+    for start in range(0, len(dataframe), batch_size):
+        end = min(start + batch_size, len(dataframe))
+        prompts = [
+            _prompt(
+                tokenizer,
+                row=dataframe.iloc[position],
+                prediction=int(predictions[position]),
+                variants=comment_variants[position],
+            )
+            for position in range(start, end)
+        ]
+        encoded = tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            max_length=4096,
+            return_tensors="pt",
+        ).to(model.device)
+        with torch.inference_mode():
+            output = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        input_length = encoded["input_ids"].shape[1]
+        for sequence in output:
+            decoded = tokenizer.decode(sequence[input_length:], skip_special_tokens=True)
+            generated.append(_clean_generated(decoded))
 
     del model, tokenizer
     gc.collect()
-    torch.cuda.empty_cache()
-
-    return comments
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return generated

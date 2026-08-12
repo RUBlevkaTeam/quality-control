@@ -1,0 +1,237 @@
+{
+  "format_version": 2,
+  "feature_schema": {
+    "version": 2,
+    "text_features": "word-char-title-rules",
+    "rule_feature_names": [
+      "marker_any",
+      "marker_name",
+      "marker_description",
+      "explicit_not_bad",
+      "sports_any",
+      "sports_name",
+      "marker_x_not_bad",
+      "marker_x_sports",
+      "strict_bad_marker",
+      "strict_bad_marker_no_sports",
+      "bach_flower",
+      "empty_supplement_container",
+      "standalone_ignition",
+      "fuel_or_material",
+      "device",
+      "included",
+      "content_absent",
+      "refillable",
+      "absence_non_refill",
+      "empirical_absence_veto",
+      "designed_for",
+      "built_in_ignition",
+      "component_or_accessory",
+      "fuel_x_included",
+      "device_x_included",
+      "device_x_absent",
+      "device_x_designed_for",
+      "standalone_x_absent",
+      "name_standalone",
+      "name_fuel",
+      "name_device",
+      "name_included",
+      "name_absent",
+      "description_included",
+      "description_absent",
+      "strict_positive_family",
+      "log_name_length",
+      "log_description_length"
+    ],
+    "retrieval_text_digest": "blake2b-128"
+  },
+  "folds": 5,
+  "baseline_public_score": 0.5077170722469463,
+  "categories": {
+    "БАД": {
+      "selected_policy": {
+        "mode": "hybrid",
+        "weight": 1.5,
+        "threshold": 0.31574087581251414
+      },
+      "hard_retrieval_coverage": 0.393493104833311,
+      "candidates": [
+        {
+          "mode": "text",
+          "weight": 0.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9448929448929448,
+          "recall": 0.9676491732566499,
+          "f1": 0.9561356774995561
+        },
+        {
+          "mode": "hard",
+          "weight": 0.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9449122807017544,
+          "recall": 0.9680086268871315,
+          "f1": 0.9563210227272727
+        },
+        {
+          "mode": "tier_a",
+          "weight": 0.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9440547176429323,
+          "recall": 0.9674694464414091,
+          "f1": 0.9556186756612818
+        },
+        {
+          "mode": "tier_a_negative",
+          "weight": 0.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9450395083406496,
+          "recall": 0.9672897196261683,
+          "f1": 0.95603517186251
+        },
+        {
+          "mode": "tier_a_positive",
+          "weight": 0.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9439088518843121,
+          "recall": 0.9678289000718907,
+          "f1": 0.955719229745319
+        },
+        {
+          "mode": "hybrid",
+          "weight": 0.5,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9441526610644257,
+          "recall": 0.9692667145938174,
+          "f1": 0.9565448740688187
+        },
+        {
+          "mode": "hybrid",
+          "weight": 1.0,
+          "threshold": 0.3108505390943552,
+          "precision": 0.9433566433566434,
+          "recall": 0.9698058950395398,
+          "f1": 0.956398440269408
+        },
+        {
+          "mode": "hybrid",
+          "weight": 1.5,
+          "threshold": 0.31574087581251414,
+          "precision": 0.94368660370759,
+          "recall": 0.9698058950395398,
+          "f1": 0.9565679843999291
+        },
+        {
+          "mode": "hybrid",
+          "weight": 2.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9438418474457663,
+          "recall": 0.969626168224299,
+          "f1": 0.9565602836879432
+        },
+        {
+          "mode": "hybrid",
+          "weight": 3.0,
+          "threshold": 0.31574087581251414,
+          "precision": 0.9436570428696412,
+          "recall": 0.9692667145938174,
+          "f1": 0.956290451281142
+        }
+      ]
+    },
+    "Легковоспламеняющиеся": {
+      "selected_policy": {
+        "mode": "text",
+        "weight": 0.0,
+        "threshold": 0.6009268449270064
+      },
+      "hard_retrieval_coverage": 0.6966557615412577,
+      "candidates": [
+        {
+          "mode": "text",
+          "weight": 0.0,
+          "threshold": 0.6009268449270064,
+          "precision": 0.9485714285714286,
+          "recall": 0.8383838383838383,
+          "f1": 0.8900804289544236
+        },
+        {
+          "mode": "hard",
+          "weight": 0.0,
+          "threshold": 0.643798439736148,
+          "precision": 0.9529411764705882,
+          "recall": 0.8181818181818182,
+          "f1": 0.8804347826086957
+        },
+        {
+          "mode": "tier_a",
+          "weight": 0.0,
+          "threshold": 0.6009268449270064,
+          "precision": 0.9485714285714286,
+          "recall": 0.8383838383838383,
+          "f1": 0.8900804289544236
+        },
+        {
+          "mode": "tier_a_negative",
+          "weight": 0.0,
+          "threshold": 0.6009268449270064,
+          "precision": 0.9485714285714286,
+          "recall": 0.8383838383838383,
+          "f1": 0.8900804289544236
+        },
+        {
+          "mode": "tier_a_positive",
+          "weight": 0.0,
+          "threshold": 0.6009268449270064,
+          "precision": 0.9485714285714286,
+          "recall": 0.8383838383838383,
+          "f1": 0.8900804289544236
+        },
+        {
+          "mode": "hybrid",
+          "weight": 0.5,
+          "threshold": 0.643798439736148,
+          "precision": 0.9585798816568047,
+          "recall": 0.8181818181818182,
+          "f1": 0.8828337874659401
+        },
+        {
+          "mode": "hybrid",
+          "weight": 1.0,
+          "threshold": 0.643798439736148,
+          "precision": 0.9585798816568047,
+          "recall": 0.8181818181818182,
+          "f1": 0.8828337874659401
+        },
+        {
+          "mode": "hybrid",
+          "weight": 1.5,
+          "threshold": 0.643798439736148,
+          "precision": 0.9585798816568047,
+          "recall": 0.8181818181818182,
+          "f1": 0.8828337874659401
+        },
+        {
+          "mode": "hybrid",
+          "weight": 2.0,
+          "threshold": 0.643798439736148,
+          "precision": 0.9585798816568047,
+          "recall": 0.8181818181818182,
+          "f1": 0.8828337874659401
+        },
+        {
+          "mode": "hybrid",
+          "weight": 3.0,
+          "threshold": 0.643798439736148,
+          "precision": 0.9585798816568047,
+          "recall": 0.8181818181818182,
+          "f1": 0.8828337874659401
+        }
+      ]
+    }
+  },
+  "mean_f1": 0.9233242066771763,
+  "selected_f1": {
+    "БАД": 0.9565679843999291,
+    "Легковоспламеняющиеся": 0.8900804289544236
+  }
+}

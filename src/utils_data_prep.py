@@ -4,27 +4,27 @@ import pandas as pd
 from pathlib import Path
 from typing import List
 
+from src.ultra_features import safe_text
+
 # Valid image extensions
-_VALID_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
+_VALID_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
 
 
 # Vectorized text construction
 def _build_text_vectorized(df: pd.DataFrame) -> pd.Series:
-
-    return (
-        'Название: ' + df['name'].astype(str) + '\n'
-        'Категория: ' + df['category'].astype(str) + '\n'
-        'Описание: ' + df['description'].astype(str)
-    )
+    names = df['name'].map(safe_text)
+    categories = df['category'].map(safe_text)
+    descriptions = df['description'].map(safe_text)
+    return 'Название: ' + names + '\nКатегория: ' + categories + '\nОписание: ' + descriptions
 
 # Find valid image files for a single product id
 def _find_images_for_id(id_val, images_path: Path) -> List[str]:
     
     img_dir = images_path / str(id_val)
-    if not img_dir.exists():
+    if not img_dir.is_dir():
         return []
-    return [str(img_dir / f) for f in sorted(img_dir.iterdir())
-            if Path(f).suffix.lower() in _VALID_EXTENSIONS]
+    return [str(f) for f in sorted(img_dir.iterdir())
+            if f.is_file() and Path(f).suffix.lower() in _VALID_EXTENSIONS]
 
 # Vectorized image path discovery based on  id column
 def _find_images_vectorized(df: pd.DataFrame, images_path: Path) -> pd.Series:
@@ -35,6 +35,9 @@ def _find_images_vectorized(df: pd.DataFrame, images_path: Path) -> pd.Series:
 def prepare_dataframe(data_path: str, images_path: str) -> pd.DataFrame:
     
     current_df = pd.read_csv(data_path)
+    for column in ('name', 'description'):
+        if column in current_df:
+            current_df[column] = current_df[column].fillna('')
     img_dir = Path(images_path)
 
     # Vectorized text construction
