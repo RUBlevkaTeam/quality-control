@@ -16,6 +16,7 @@ CLAUDE.md
 .python-version
 .venv/
 venv/
+venv312/
 env/
 ENV/
 
@@ -51,4 +52,8 @@ pip-wheel-metadata/
 .ipynb_checkpoints/
 
 /content/content_ecup/images/
+/images
+test.ipynb
+podchet.py
+/ecup_quality_ultra
 /ECUP_QUALITY_AGENT_BUNDLE/
