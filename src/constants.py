@@ -8,11 +8,12 @@ PIXEL_PRESETS = {
 }
 
 # Default inference batch sizes tuned for H100 80GB
+# Если будем запускать на макбуках, то надо будет уменьшить
 DEFAULT_EMBED_BATCH_SIZE = 128
 DEFAULT_LLM_BATCH_SIZE = 64
 
 # Classifier artifact path (relative to submit root)
-_ARTIFACT_REL = "artifacts/product_quality_predictor.joblib"
+_ARTIFACT_REL = "baseline_qwen3vl_bf16.joblib"
 
 # Models directory (matches evaluator's SHARED_MODELS_PATH convention)
 SHARED_MODELS_DIR = "SHARED_MODELS_PATH"
@@ -24,11 +25,10 @@ EMBED_MODEL_NAME = "Qwen/Qwen3-VL-Embedding-2B"
 # LLM model path
 LLM_MODEL_NAME = "Qwen/Qwen3.5-4B"
 
-# Comment formatting constants
 MIN_COMMENT_LEN = 50
 MAX_COMMENT_LEN = 300
-MIN_COMMENT_FILLER = " или что-то типа того, я же все-таки LLM в конце-концов."
+MIN_COMMENT_FILLER = " Вердикт основан на данных карточки товара."
 MISSING_COMMENT_PLACEHOLDER = (
-    "Здесь мог бы быть развернутый комментарий с объяснением указанного вердикта, "
-    "но я LLM, и я так вижу."
+    "Вердикт вынесен по названию, описанию и изображениям товара "
+    "в соответствии с правилами его категории."
 )
