@@ -53,7 +53,6 @@ pip-wheel-metadata/
 
 /content/content_ecup/images/
 /images
-data.csv
 test.ipynb
 podchet.py
 /ecup_quality_ultra
