@@ -8,7 +8,11 @@ import zipfile
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-ROOT_FILES = ("run.py", "metadata.json", "baseline_qwen3vl_bf16.joblib")
+BASE_ROOT_FILES = ("run.py", "metadata.json")
+CLASSIFIER_FILES = (
+    "baseline_qwen3vl_bf16.npz",
+    "baseline_qwen3vl_bf16.joblib",
+)
 SOURCE_FILES = (
     "__init__.py",
     "constants.py",
@@ -29,7 +33,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    for relative in ROOT_FILES:
+    classifier_file = next(
+        (name for name in CLASSIFIER_FILES if (PROJECT_DIR / name).is_file()),
+        None,
+    )
+    if classifier_file is None:
+        raise FileNotFoundError(
+            f"required classifier is missing; expected one of {CLASSIFIER_FILES}"
+        )
+    root_files = (*BASE_ROOT_FILES, classifier_file)
+    for relative in root_files:
         path = PROJECT_DIR / relative
         if not path.is_file():
             raise FileNotFoundError(f"required submission file is missing: {path}")
@@ -43,7 +56,7 @@ def main() -> None:
         raise FileNotFoundError(f"submission modules are missing: {missing_sources}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(args.output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative in ROOT_FILES:
+        for relative in root_files:
             archive.write(PROJECT_DIR / relative, arcname=relative)
         for path in source_files:
             archive.write(path, arcname=f"src/{path.name}")
@@ -53,7 +66,7 @@ def main() -> None:
         names = set(archive.namelist())
     if bad_file:
         raise RuntimeError(f"corrupt file in archive: {bad_file}")
-    required_names = set(ROOT_FILES) | {"src/__init__.py"}
+    required_names = set(root_files) | {"src/__init__.py"}
     if not required_names.issubset(names):
         raise RuntimeError(f"archive is missing: {sorted(required_names - names)}")
     size_mb = args.output.stat().st_size / 1024**2

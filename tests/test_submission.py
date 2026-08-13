@@ -1,13 +1,26 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
+from run import resolve_classifier_path, resolve_models_dir
 from scripts.validate_submission import validate_submission
 
 
 class SubmissionValidationTest(unittest.TestCase):
+    def test_models_path_precedence(self):
+        with patch.dict("os.environ", {"SHARED_MODELS_PATH": "/mounted/models"}):
+            self.assertEqual(resolve_models_dir(), Path("/mounted/models"))
+            self.assertEqual(
+                resolve_models_dir(Path("/explicit/models")),
+                Path("/explicit/models"),
+            )
+
+    def test_classifier_falls_back_to_existing_joblib(self):
+        self.assertTrue(resolve_classifier_path().is_file())
+
     def test_valid_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -41,4 +54,3 @@ class SubmissionValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -60,9 +60,9 @@ _USER_PROMPT_TEMPLATE = (
 
 
 # Helper to build chat template prompt for a single sample
-def _build_prompt(text: str, logreg_prob: float, tokenizer) -> str:
+def _build_prompt(text: str, prediction: int, tokenizer) -> str:
     
-    pred_label = "хороший" if logreg_prob >= 0.5 else "плохой"
+    pred_label = "хороший" if prediction else "плохой"
     pred_label_lower = pred_label.lower()
 
     user_text = _USER_PROMPT_TEMPLATE.format(
@@ -106,29 +106,33 @@ def generate_comments_cuda(
     max_new_tokens: int = 120,
     do_sample: bool = False,
 ) -> List[str]:
-    
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        dtype = torch.float16
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        dtype = torch.float16
+    else:
+        device = torch.device("cpu")
+        dtype = torch.float32
+
     _is_local = os.path.exists(llm_model_path) or (
         os.path.isabs(llm_model_path) and not llm_model_path.startswith(("http://", "https://", "file://"))
     )
+    load_kwargs = {
+        "local_files_only": _is_local,
+        "trust_remote_code": True,
+    }
+    tokenizer = AutoTokenizer.from_pretrained(llm_model_path, **load_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(
+        llm_model_path,
+        dtype=dtype,
+        **load_kwargs,
+    ).to(device)
 
-    if _is_local:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            local_files_only=True,
-            trust_remote_code=True,
-            device_map="auto",
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            device_map="auto",
-        )
-
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model.eval()
     n = len(df)
     comments: List[str] = []
@@ -141,9 +145,8 @@ def generate_comments_cuda(
         prompts_list = []
         for _, row in batch_df.iterrows():
             text = row.get('text', '') or ''
-            # Do we tweak it? Tinker with it and maybe the score improves :idk:
-            prob = row.get('pred', 0.0) if hasattr(row, 'pred') else 0.0
-            prompts_list.append(_build_prompt(text, prob, tokenizer))
+            prediction = int(row.get('pred', 0))
+            prompts_list.append(_build_prompt(text, prediction, tokenizer))
 
         # Generate in one batch call
         batch_comments = _generate_batch(
@@ -154,6 +157,9 @@ def generate_comments_cuda(
 
     del model, tokenizer
     gc.collect()
-    torch.cuda.empty_cache()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
 
     return comments

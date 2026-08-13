@@ -13,8 +13,6 @@ from PIL import Image
 from transformers import AutoProcessor, AutoModel
 from pathlib import Path
 
-from src.constants import PIXEL_PRESETS
-
 # скейлинг под максмимальное количество пикселей
 def _resize_image_to_max_pixels(img: Image.Image, max_pixels: int, resample=Image.LANCZOS) -> Image.Image:
     
@@ -127,7 +125,7 @@ def embed_data_cuda(
 
     processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
     model = AutoModel.from_pretrained(
-        embed_model_path, torch_dtype=dtype, local_files_only=True, trust_remote_code=True
+        embed_model_path, dtype=dtype, local_files_only=True, trust_remote_code=True
     )
     model = model.to(device).eval()
 

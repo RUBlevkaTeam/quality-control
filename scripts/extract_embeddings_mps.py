@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.constants import PIXEL_PRESETS
+from src.constants import DEFAULT_PIXEL_PRESET, PIXEL_PRESETS
 from src.utils_data_prep import prepare_dataframe
 from src.utils_embed_cuda import embed_data_cuda
 
@@ -37,13 +37,22 @@ def main() -> None:
         default=PROJECT_DIR / "cache/qwen3_vl_mps.npy",
     )
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--pixel-preset", choices=tuple(PIXEL_PRESETS), default="S")
+    parser.add_argument(
+        "--pixel-preset",
+        choices=tuple(PIXEL_PRESETS),
+        default=DEFAULT_PIXEL_PRESET,
+    )
     parser.add_argument(
         "--limit",
         type=int,
         help="Extract only the first N rows for a smoke test",
     )
     args = parser.parse_args()
+
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
 
     if not torch.backends.mps.is_available():
         raise RuntimeError(
@@ -55,19 +64,9 @@ def main() -> None:
     if not args.data.is_file():
         raise FileNotFoundError(f"data CSV not found: {args.data}")
 
-    raw = pd.read_csv(args.data)
+    prepared = prepare_dataframe(args.data, args.data.parent / "images")
     if args.limit is not None:
-        if args.limit < 1:
-            parser.error("--limit must be positive")
-        raw = raw.head(args.limit)
-        temporary_csv = args.output.with_suffix(".input.csv")
-        temporary_csv.parent.mkdir(parents=True, exist_ok=True)
-        raw.to_csv(temporary_csv, index=False)
-        data_path = temporary_csv
-    else:
-        data_path = args.data
-
-    prepared = prepare_dataframe(data_path, args.data.parent / "images")
+        prepared = prepared.head(args.limit)
     started = datetime.now(timezone.utc)
     print(
         f"Extracting {len(prepared):,} rows on MPS; batch={args.batch_size}; "
@@ -105,4 +104,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

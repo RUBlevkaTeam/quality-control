@@ -1,4 +1,3 @@
-import numpy as np
 from typing import List
 
 from src.constants import (
@@ -32,17 +31,15 @@ def _patch_comment(raw_comment: str, min_len: int, max_len: int, filler: str, pl
 # Format comments and verdicts in a single pass
 def format_results(raw_comments, crisp_verdicts) -> List[str]:
     
-    n = len(raw_comments) if raw_comments else 0
+    n = len(raw_comments)
     if n == 0:
         return []
 
     results = []
-    verdict_map = {1: "не бан", 0: "бан", True: "не бан", False: "бан", None: "бан"}
-
     for i in range(n):
-        verdict = verdict_map.get(crisp_verdicts[i], "бан") if crisp_verdicts else "бан"
+        verdict = "не бан" if crisp_verdicts[i] else "бан"
         comment = _patch_comment(
-            raw_comments[i] if raw_comments else "",
+            raw_comments[i],
             MIN_COMMENT_LEN,
             MAX_COMMENT_LEN,
             MIN_COMMENT_FILLER,

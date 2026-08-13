@@ -79,6 +79,26 @@ def metrics_payload(
     return payload
 
 
+def model_selection_payload(
+    selected_configs: dict[str, dict[str, object]],
+    candidates: list[dict[str, object]],
+) -> dict[str, float | int]:
+    """Flatten selected hyperparameters and candidate scores for W&B."""
+    payload: dict[str, float | int] = {"search/candidate_count": len(candidates)}
+    for category, config in selected_configs.items():
+        name = category_metric_name(str(category))
+        payload[f"hyperparameters/{name}/c"] = float(config["c"])
+        payload[f"hyperparameters/{name}/normalize"] = int(bool(config["normalize"]))
+    for index, candidate in enumerate(candidates):
+        prefix = f"search/candidate_{index}"
+        payload[f"{prefix}/c"] = float(candidate["c"])
+        payload[f"{prefix}/normalize"] = int(bool(candidate["normalize"]))
+        payload[f"{prefix}/mean_f1"] = float(
+            candidate["metrics_tuned"]["mean_f1"]
+        )
+    return payload
+
+
 class WandbTracker:
     """Small adapter that keeps WandB optional for the rest of the project."""
 
@@ -173,12 +193,26 @@ class WandbTracker:
         for key, value in payload.items():
             self.run.summary[key] = value
 
+    def log_model_selection(
+        self,
+        *,
+        selected_configs: dict[str, dict[str, object]],
+        candidates: list[dict[str, object]],
+    ) -> None:
+        if not self.enabled:
+            return
+        payload = model_selection_payload(selected_configs, candidates)
+        self.run.log(payload)
+        for key, value in payload.items():
+            self.run.summary[key] = value
+
     def log_artifacts(
         self,
         *,
         experiment_id: str,
         report_files: list[Path],
         model_path: Path | None = None,
+        model_paths: list[Path] | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -190,11 +224,16 @@ class WandbTracker:
                 report_artifact.add_file(str(path), name=path.name)
         self.run.log_artifact(report_artifact)
 
-        if model_path is not None and model_path.is_file():
+        paths = list(model_paths or [])
+        if model_path is not None:
+            paths.append(model_path)
+        paths = [path for path in paths if path.is_file()]
+        if paths:
             model_artifact = self._wandb.Artifact(
                 name=f"{experiment_id}-model", type="model"
             )
-            model_artifact.add_file(str(model_path), name=model_path.name)
+            for path in paths:
+                model_artifact.add_file(str(path), name=path.name)
             self.run.log_artifact(model_artifact)
 
     def finish(self) -> None:

@@ -1,6 +1,10 @@
 import unittest
 
-from src.wandb_tracking import category_metric_name, metrics_payload
+from src.wandb_tracking import (
+    category_metric_name,
+    metrics_payload,
+    model_selection_payload,
+)
 
 
 class WandbTrackingTest(unittest.TestCase):
@@ -33,6 +37,22 @@ class WandbTrackingTest(unittest.TestCase):
         self.assertEqual(payload["thresholds/bad"], 0.35)
         self.assertEqual(payload["runtime/total_seconds"], 12.5)
         self.assertEqual(payload["errors/count"], 7)
+
+    def test_model_selection_is_flattened(self):
+        payload = model_selection_payload(
+            {"БАД": {"c": 0.1, "normalize": True}},
+            [
+                {
+                    "c": 0.1,
+                    "normalize": True,
+                    "metrics_tuned": {"mean_f1": 0.8},
+                }
+            ],
+        )
+
+        self.assertEqual(payload["hyperparameters/bad/c"], 0.1)
+        self.assertEqual(payload["hyperparameters/bad/normalize"], 1)
+        self.assertEqual(payload["search/candidate_0/mean_f1"], 0.8)
 
 
 if __name__ == "__main__":
