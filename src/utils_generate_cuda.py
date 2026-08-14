@@ -1,12 +1,12 @@
 import gc
-import os
+import re
 from typing import List
 
-import numpy as np
 import pandas as pd
-import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+from src.constants import MAX_PROMPT_TOKENS
 
 
 # Helper to tokenize a batch of prompts and generate comments in one pass
@@ -22,10 +22,16 @@ def _generate_batch(
         prompts_list,
         padding=True,
         truncation=True,
+        max_length=MAX_PROMPT_TOKENS,
         return_tensors="pt",
     ).to(model.device)
 
-    pad_token_id = model.config.pad_token_id or tokenizer.pad_token_id or 151643
+    # 0 - валидный id, поэтому "or" тут не годится: он провалится дальше по цепочке
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = model.config.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id
 
     with torch.no_grad():
         outputs = model.generate(
@@ -106,28 +112,24 @@ def generate_comments_cuda(
     max_new_tokens: int = 120,
     do_sample: bool = False,
 ) -> List[str]:
-    
-    _is_local = os.path.exists(llm_model_path) or (
-        os.path.isabs(llm_model_path) and not llm_model_path.startswith(("http://", "https://", "file://"))
+    if len(df) == 0:
+        return []
+
+    # проверка идёт офлайн: неверный путь должен падать сразу, а не уходить в сеть
+    tokenizer = AutoTokenizer.from_pretrained(llm_model_path, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        llm_model_path,
+        torch_dtype=torch.float16,
+        local_files_only=True,
+        trust_remote_code=True,
+        device_map="auto",
     )
 
-    if _is_local:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            local_files_only=True,
-            trust_remote_code=True,
-            device_map="auto",
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(llm_model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            llm_model_path,
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            device_map="auto",
-        )
+    # КРИТИЧНО для decoder-only: при padding справа короткие промпты в батче
+    # продолжаются от pad-токенов, и срез out[input_length:] вырезает мусор.
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
     n = len(df)
