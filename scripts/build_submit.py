@@ -50,7 +50,10 @@ def main() -> None:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from src.image_retrieval import load_retrieval_index
+    from src.text_model import TextQualityModel
+
     load_retrieval_index(ROOT / "image_retrieval.npz")
+    TextQualityModel.load(ROOT / "text_model.joblib")
 
     with zipfile.ZipFile(OUTPUT, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for relative in ALLOWLIST:

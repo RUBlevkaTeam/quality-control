@@ -1,4 +1,4 @@
-"""Категорийный sparse-классификатор текста и rule-признаков.
+"""Текстовый классификатор: TF-IDF по name+description и логрег на категорию.
 
 Основной источник вердикта. По OOF-замерам на data.csv текст даёт средний
 F1 ~0.86 против 0.505 у эмбеддингового пути на лидерборде, при этом не требует
@@ -17,23 +17,14 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from src.rule_features import (
-    FLAMMABLE_CATEGORY,
-    build_model_texts as build_normalized_model_texts,
-    rule_feature_matrix,
-)
+from src.rule_features import rule_feature_matrix
 from src.utils_data_prep import _clean
 from src.utils_logreg import ProductQualityPredictor, _norm_category
 
-TEXT_MODEL_FORMAT_VERSION = 3
+TEXT_MODEL_FORMAT_VERSION = 2
 
-# БАД оставляем на проверенной word-only голове. Для редкого класса
-# «Легковоспламеняющиеся» добавляем устойчивые к опечаткам и вариантам написания
-# char-каналы; на одинаковых family-folds они дали стабильный прирост.
-_BASIC_RULE_WEIGHT = 2.0
-_RICH_RULE_WEIGHT = 3.0
-_BASIC_MODE = "word_rules"
-_RICH_MODE = "word_char_title_rules"
+# вес rule-признаков относительно TF-IDF, как у ultra (проверено её 0.8)
+_RULE_WEIGHT = 2.0
 
 # Название повторено трижды: для TF-IDF это вес признаков заголовка.
 # Замер на data.csv: +0.010 среднего F1, почти весь прирост на редкой
@@ -55,46 +46,16 @@ def build_model_texts(df: pd.DataFrame) -> pd.Series:
     return (title + "Описание: " + desc).str.strip()
 
 
-# TF-IDF + rule-признаки одной sparse-матрицей; используется и в train, и в predict.
-def _rule_matrix(df: pd.DataFrame, weight: float):
+# TF-IDF + rule-признаки одной sparse-матрицей; используется и в train, и в predict
+def _build_features(vectorizer, texts, df: pd.DataFrame, fit: bool):
     from scipy import sparse
 
+    tfidf = vectorizer.fit_transform(texts) if fit else vectorizer.transform(texts)
     names = df["name"].tolist() if "name" in df.columns else [""] * len(df)
     descs = df["description"].tolist() if "description" in df.columns else [""] * len(df)
     cats = df["category"].tolist() if "category" in df.columns else [""] * len(df)
-    rules = rule_feature_matrix(names, descs, cats) * np.float32(weight)
-    return sparse.csr_matrix(rules)
-
-
-def _build_basic_features(vectorizer, df: pd.DataFrame, fit: bool):
-    from scipy import sparse
-
-    texts = build_model_texts(df).values
-    tfidf = vectorizer.fit_transform(texts) if fit else vectorizer.transform(texts)
-    return sparse.hstack(
-        (tfidf, _rule_matrix(df, _BASIC_RULE_WEIGHT)), format="csr"
-    )
-
-
-def _build_rich_features(vectorizers: dict, df: pd.DataFrame, fit: bool):
-    """Word + body char + title char channels for the rare fire category."""
-
-    from scipy import sparse
-
-    names = df["name"].tolist() if "name" in df.columns else [""] * len(df)
-    descs = df["description"].tolist() if "description" in df.columns else [""] * len(df)
-    texts = build_normalized_model_texts(names, descs)
-    title_texts = build_normalized_model_texts(names, [""] * len(df))
-
-    transform = "fit_transform" if fit else "transform"
-    word = getattr(vectorizers["word"], transform)(texts)
-    char = getattr(vectorizers["char"], transform)(texts)
-    title = getattr(vectorizers["title"], transform)(title_texts)
-    return sparse.hstack(
-        (word, char, title, _rule_matrix(df, _RICH_RULE_WEIGHT)),
-        format="csr",
-        dtype=np.float32,
-    )
+    rules = rule_feature_matrix(names, descs, cats) * np.float32(_RULE_WEIGHT)
+    return sparse.hstack((tfidf, sparse.csr_matrix(rules)), format="csr")
 
 
 # Точный поиск порога: F1 меняется только на наблюдаемых значениях
@@ -143,6 +104,7 @@ class TextQualityModel:
         """families: Series id -> family. С ней фолды режутся по семействам
         почти-дублей (53% товаров в семействах!) - без этого OOF завышен:
         0.871 против 0.687 на лидерборде."""
+        from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
         self.category_models = {}
@@ -155,6 +117,7 @@ class TextQualityModel:
             # с одинаковой меткой рвутся сплитом и завышают OOF
             subset = ProductQualityPredictor._dedup(subset).reset_index(drop=True)
 
+            texts = build_model_texts(subset).values
             y = np.asarray(subset["label"].values, dtype=np.int64)
             n_pos = int(y.sum())
             if n_pos == 0 or n_pos == len(y):
@@ -165,23 +128,19 @@ class TextQualityModel:
             if fam_by_id is not None:
                 groups = np.asarray([fam_by_id.get(i, -1) for i in subset["id"]])
                 cv = StratifiedGroupKFold(splits, shuffle=True, random_state=random_state)
-                folds = list(cv.split(subset, y, groups))
+                folds = list(cv.split(texts, y, groups))
             else:
                 cv = StratifiedKFold(splits, shuffle=True, random_state=random_state)
-                folds = list(cv.split(subset, y))
+                folds = list(cv.split(texts, y))
 
             best = None
             for C in c_grid:
                 oof = np.zeros(len(y), dtype=np.float64)
                 for tr, va in folds:
-                    features = self._make_feature_bundle(category)
-                    x_tr = self._build_category_features(
-                        category, features, subset.iloc[tr], fit=True
-                    )
-                    x_va = self._build_category_features(
-                        category, features, subset.iloc[va], fit=False
-                    )
-                    clf = self._make_classifier(category, C)
+                    vec = self._make_vectorizer()
+                    x_tr = _build_features(vec, texts[tr], subset.iloc[tr], fit=True)
+                    x_va = _build_features(vec, texts[va], subset.iloc[va], fit=False)
+                    clf = LogisticRegression(C=C, max_iter=2000, class_weight="balanced")
                     clf.fit(x_tr, y[tr])
                     oof[va] = clf.predict_proba(x_va)[:, 1]
                 f1, threshold = exact_best_threshold(oof, y)
@@ -191,14 +150,15 @@ class TextQualityModel:
             if best is None or best["oof_f1"] <= 0.0:
                 raise RuntimeError(f"{category}: ни одна конфигурация не дала F1 > 0")
 
-            features = self._make_feature_bundle(category)
-            matrix = self._build_category_features(category, features, subset, fit=True)
-            classifier = self._make_classifier(category, best["C"])
+            vectorizer = self._make_vectorizer()
+            matrix = _build_features(vectorizer, texts, subset, fit=True)
+            classifier = LogisticRegression(
+                C=best["C"], max_iter=2000, class_weight="balanced"
+            )
             classifier.fit(matrix, y)
 
             self.category_models[category] = {
-                "feature_mode": self._feature_mode(category),
-                "features": features,
+                "vectorizer": vectorizer,
                 "classifier": classifier,
                 "threshold": best["threshold"],
                 "C": best["C"],
@@ -208,7 +168,7 @@ class TextQualityModel:
             }
             report[category] = {
                 k: v for k, v in self.category_models[category].items()
-                if k not in ("features", "classifier")
+                if k not in ("vectorizer", "classifier")
             }
             _log(
                 f"{category}: OOF F1={best['oof_f1']:.4f}, порог={best['threshold']:.4f}, "
@@ -222,7 +182,7 @@ class TextQualityModel:
         return report
 
     @staticmethod
-    def _make_basic_vectorizer():
+    def _make_vectorizer():
         from sklearn.feature_extraction.text import TfidfVectorizer
 
         # word 1-2 граммы: по замерам не уступают char_wb 3-6 (0.8610 против
@@ -234,74 +194,6 @@ class TextQualityModel:
             sublinear_tf=True,
             dtype=np.float32,
         )
-
-    @staticmethod
-    def _make_rich_vectorizers() -> dict:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        return {
-            "word": TfidfVectorizer(
-                analyzer="word",
-                ngram_range=(1, 2),
-                min_df=2,
-                max_df=0.999,
-                max_features=100_000,
-                sublinear_tf=True,
-                token_pattern=r"(?u)\b\w+\b",
-                dtype=np.float32,
-            ),
-            "char": TfidfVectorizer(
-                analyzer="char_wb",
-                ngram_range=(3, 6),
-                min_df=2,
-                max_df=0.999,
-                max_features=160_000,
-                sublinear_tf=True,
-                dtype=np.float32,
-            ),
-            "title": TfidfVectorizer(
-                analyzer="char_wb",
-                ngram_range=(2, 6),
-                min_df=2,
-                max_df=0.999,
-                max_features=70_000,
-                sublinear_tf=True,
-                dtype=np.float32,
-            ),
-        }
-
-    @staticmethod
-    def _feature_mode(category: object) -> str:
-        return _RICH_MODE if str(category) == FLAMMABLE_CATEGORY else _BASIC_MODE
-
-    @classmethod
-    def _make_feature_bundle(cls, category: object) -> dict:
-        if cls._feature_mode(category) == _RICH_MODE:
-            return cls._make_rich_vectorizers()
-        return {"word": cls._make_basic_vectorizer()}
-
-    @classmethod
-    def _build_category_features(
-        cls, category_or_mode: object, features: dict, df: pd.DataFrame, fit: bool
-    ):
-        value = str(category_or_mode)
-        mode = value if value in {_BASIC_MODE, _RICH_MODE} else cls._feature_mode(value)
-        if mode == _RICH_MODE:
-            return _build_rich_features(features, df, fit)
-        return _build_basic_features(features["word"], df, fit)
-
-    @staticmethod
-    def _make_classifier(category: object, C: float):
-        from sklearn.linear_model import LogisticRegression
-
-        kwargs = {
-            "C": C,
-            "max_iter": 2000,
-            "class_weight": "balanced",
-        }
-        if str(category) == FLAMMABLE_CATEGORY:
-            kwargs.update(solver="liblinear", random_state=2026)
-        return LogisticRegression(**kwargs)
 
     # ------------------------------------------------------------------
     # инференс
@@ -316,6 +208,7 @@ class TextQualityModel:
         if n == 0 or not self.category_models:
             return probs.tolist(), preds.tolist()
 
+        texts = build_model_texts(df).values
         categories = df["category"].tolist() if "category" in df.columns else [""] * n
         keys = [_norm_category(c) for c in categories]
         heads = {_norm_category(name): info for name, info in self.category_models.items()}
@@ -332,9 +225,7 @@ class TextQualityModel:
                 continue
             index = np.asarray(positions, dtype=np.int64)
             sub = df.iloc[index]
-            matrix = self._build_category_features(
-                info["feature_mode"], info["features"], sub, fit=False
-            )
+            matrix = _build_features(info["vectorizer"], texts[index], sub, fit=False)
             block = info["classifier"].predict_proba(matrix)[:, 1]
             probs[index] = block
             preds[index] = (block >= float(info["threshold"])).astype(np.int64)
@@ -346,13 +237,11 @@ class TextQualityModel:
     def summary(self) -> str:
         if not self.category_models:
             return "текстовая модель пуста"
-        parts = []
-        for name, info in self.category_models.items():
-            vocab = sum(len(vec.vocabulary_) for vec in info["features"].values())
-            parts.append(
-                f"{name}: {info['feature_mode']}, порог {info['threshold']:.3f}, "
-                f"словарь {vocab}, OOF {info.get('oof_f1', 0):.3f}"
-            )
+        parts = [
+            f"{name}: порог {info['threshold']:.3f}, "
+            f"словарь {len(info['vectorizer'].vocabulary_)}, OOF {info.get('oof_f1', 0):.3f}"
+            for name, info in self.category_models.items()
+        ]
         return "; ".join(parts)
 
     # ------------------------------------------------------------------
@@ -386,18 +275,9 @@ class TextQualityModel:
         if not getattr(model, "category_models", None):
             raise ValueError("в артефакте нет ни одной категории")
         for name, info in model.category_models.items():
-            for key in ("feature_mode", "features", "classifier", "threshold"):
+            for key in ("vectorizer", "classifier", "threshold"):
                 if key not in info:
                     raise ValueError(f"{name!r}: в артефакте нет поля {key!r}")
-            mode = info["feature_mode"]
-            required_features = (
-                {"word", "char", "title"} if mode == _RICH_MODE else {"word"}
-            )
-            if mode not in {_BASIC_MODE, _RICH_MODE}:
-                raise ValueError(f"{name!r}: неизвестный feature_mode {mode!r}")
-            missing = sorted(required_features - set(info["features"]))
-            if missing:
-                raise ValueError(f"{name!r}: не хватает векторизаторов {missing}")
             threshold = float(info["threshold"])
             if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
                 raise ValueError(f"{name!r}: некорректный порог {threshold}")
