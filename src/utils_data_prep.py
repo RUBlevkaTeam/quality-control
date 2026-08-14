@@ -1,22 +1,40 @@
 import html
+import math
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
 
-_VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+_VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 _TEXT_COLUMNS = ("name", "category", "description")
 
 # имя тега только латиницей: иначе после раскрытия сущностей конструкции
 # вроде <складной> будут вырезаны как теги
 _TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,19}(?:\s[^>]{0,300})?/?>")
 _WS_RE = re.compile(r"\s+")
+# BOM и zero-width: NFKC их не убирает, а в токенизатор они попадают как мусор
+_INVISIBLE_RE = re.compile(r"[­​-‏ -‮⁠-⁯﻿]")
+
+
+# NaN/None -> "", всё остальное -> str. Без этого .map(html.unescape) падает
+# с TypeError, если колонка приедет числовой (например, name из одних чисел).
+def safe_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    return str(value)
+
 
 # убирает HTML разметку
 def _clean(series: pd.Series) -> pd.Series:
-    cleaned = series.fillna("").map(html.unescape).map(html.unescape)
+    cleaned = series.map(safe_text).map(html.unescape).map(html.unescape)
+    # NFKC приводит совместимые формы к каноничным (лигатуры, полноширинные знаки)
+    cleaned = cleaned.map(lambda text: unicodedata.normalize("NFKC", text))
+    cleaned = cleaned.str.replace(_INVISIBLE_RE, "", regex=True)
     # тег заменяем ПРОБЕЛОМ, иначе <p>не</p><p>является</p> склеится в «неявляется»
     cleaned = cleaned.str.replace(_TAG_RE, " ", regex=True)
     return cleaned.str.replace(_WS_RE, " ", regex=True).str.strip()
@@ -53,14 +71,26 @@ def _scan_images_root(images_path: Path) -> Dict[str, List[str]]:
             index[entry.name] = sorted(files)
     return index
 
+# id -> имя папки. Голый astype(str) не годится: если в колонке окажется хоть
+# один NaN, pandas сделает её float64, и id 3 превратится в "3.0" - совпадений
+# с именами папок не будет ни одного, а картинки потеряются молча.
+def _id_to_key(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ""
+        if value.is_integer():
+            return str(int(value))
+    return str(value).strip()
+
+
 # сопоставляет айди товара и айди папки с картинками и выдает список файлов картинок для каждого товара
 def _find_images_vectorized(df: pd.DataFrame, images_path: Path) -> pd.Series:
     index = _scan_images_root(images_path)
-    # astype(str) обязателен: id - int64, а ключи словаря - имена папок,
-    # без приведения ничего не найдётся и картинки потеряются молча
-    return df["id"].astype(str).map(lambda key: index.get(key, []))
+    return df["id"].map(_id_to_key).map(lambda key: index.get(key, []))
 
-# читает CSV и добавляет text, rule_text, image_paths, n_images
+# читает CSV и добавляет text, image_paths, n_images
 def prepare_dataframe(data_path: str | Path, images_path: str | Path) -> pd.DataFrame:
     current_df = pd.read_csv(data_path)
 

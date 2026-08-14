@@ -3,8 +3,8 @@ import os as _os
 _os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import gc
-import os
-from typing import List, Tuple
+import sys
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,14 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModel
 
-from src.constants import PIXEL_PRESETS
+from src.constants import EMBEDDING_DIM
+
+# перед повторной попыткой кэш надо отдать, иначе второй OOM почти гарантирован
+def _free_cuda() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 # Qwen-specific util to resize image so that w*h <= max_pixels, keeping 28-pixel grid alignment
 def _resize_image_to_max_pixels(img: Image.Image, max_pixels: int, resample=Image.LANCZOS) -> Image.Image:
@@ -90,7 +97,9 @@ def embed_data_cuda(
     max_pixels: int = 128 * 28 * 28,
     batch_size: int = 128,
 ) -> np.ndarray:
-   
+    if len(df) == 0:
+        return np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
+
     # Aggressively free memory before loading model
     torch.cuda.empty_cache()
     if torch.cuda.is_available():
@@ -98,20 +107,15 @@ def embed_data_cuda(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load model once
-    _is_local = os.path.exists(embed_model_path) or (
-        os.path.isabs(embed_model_path) and not embed_model_path.startswith(("http://", "https://", "file://"))
+    # Проверка идёт офлайн: опечатка в пути должна падать сразу, а не
+    # превращаться в попытку сходить в интернет и зависнуть на таймауте.
+    processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
+    model = AutoModel.from_pretrained(
+        embed_model_path,
+        torch_dtype=torch.float16,
+        local_files_only=True,
+        trust_remote_code=True,
     )
-    if _is_local:
-        processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
-        model = AutoModel.from_pretrained(
-            embed_model_path, torch_dtype=torch.float16, local_files_only=True, trust_remote_code=True
-        )
-    else:
-        processor = AutoProcessor.from_pretrained(embed_model_path)
-        model = AutoModel.from_pretrained(
-            embed_model_path, torch_dtype=torch.float16, trust_remote_code=True
-        )
     model = model.to(device).eval()
 
     n = len(df)
@@ -143,50 +147,81 @@ def embed_data_cuda(
             for _, row in df_with_imgs.iterrows():
                 imgs = []
                 for p in row['image_paths']:
-                    raw = Image.open(p).convert("RGB")
-                    imgs.append(_resize_image_to_max_pixels(raw, max_pixels))
+                    # битый или недочитанный файл не должен ронять весь прогон
+                    try:
+                        with Image.open(p) as source:
+                            raw = source.convert("RGB")
+                        imgs.append(_resize_image_to_max_pixels(raw, max_pixels))
+                    except (OSError, ValueError):
+                        continue
                 all_images.append(imgs)
 
             try:
+                # если у кого-то в батче не осталось читаемых картинок, общий
+                # батч собрать нельзя: число vision-токенов разойдётся с числом
+                # картинок, поэтому сразу уходим на поштучную ветку
+                if not all(all_images):
+                    raise ValueError("в батче есть товары без читаемых изображений")
                 emb_with = _embed_batch_with_images(
                     processor, model, texts_with_imgs, all_images, max_pixels, device
                 )
                 emb_with_list = list(emb_with)
-            except torch.cuda.OutOfMemoryError:
-                # Fallback: embed each sample individually
+            except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
+                # ValueError/RuntimeError ловим не зря: рассинхрон image-токенов
+                # при truncation приходит именно так, а не как OOM
+                _free_cuda()
                 emb_with_list = []
                 for idx in range(len(df_with_imgs)):
                     single_imgs = all_images[idx]
                     try:
-                        single_emb = _embed_batch_with_images(
-                            processor, model,
-                            [texts_with_imgs[idx]],
-                            [single_imgs],
-                            max_pixels, device,
-                        )
+                        if single_imgs:
+                            single_emb = _embed_batch_with_images(
+                                processor, model,
+                                [texts_with_imgs[idx]],
+                                [single_imgs],
+                                max_pixels, device,
+                            )
+                        else:
+                            single_emb = _embed_batch_text_only(
+                                processor, model, [texts_with_imgs[idx]], device
+                            )
                         emb_with_list.append(single_emb[0])
-                    except torch.cuda.OutOfMemoryError:
-                        # Even single sample OOMs — try without images
-                        for img in single_imgs:
-                            img.close()
+                    except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
+                        # последний рубеж: считаем товар только по тексту
+                        _free_cuda()
                         single_emb = _embed_batch_text_only(
                             processor, model,
                             [texts_with_imgs[idx]],
                             device,
                         )
                         emb_with_list.append(single_emb[0])
-                    finally:
-                        for img in single_imgs:
-                            try:
-                                img.close()
-                            except Exception:
-                                pass
+            finally:
+                for images in all_images:
+                    for image in images:
+                        try:
+                            image.close()
+                        except Exception:
+                            pass
 
         # Group B: embed samples WITHOUT images (text-only batch)
         if len(df_text_only) > 0:
             texts_only = df_text_only['text'].tolist()
-            emb_text = _embed_batch_text_only(processor, model, texts_only, device)
-            emb_text_list = list(emb_text)
+            try:
+                emb_text = _embed_batch_text_only(processor, model, texts_only, device)
+                emb_text_list = list(emb_text)
+            except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
+                # у текстовой группы фоллбэка не было вовсе - один длинный
+                # текст мог уронить весь прогон
+                _free_cuda()
+                emb_text_list = []
+                for text in texts_only:
+                    try:
+                        emb_text_list.append(
+                            _embed_batch_text_only(processor, model, [text], device)[0]
+                        )
+                    except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
+                        _free_cuda()
+                        emb_text_list.append(np.zeros(EMBEDDING_DIM, dtype=np.float32))
 
         # Assemble batch_result using list of 1-D arrays, then vstack at end
         # Place in correct order
@@ -213,5 +248,16 @@ def embed_data_cuda(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+
+    # fp16 может переполниться и дать inf/NaN. Дальше это уронило бы весь прогон
+    # на predict_proba, поэтому такие строки обнуляем: товар получит pred=0,
+    # но остальные посчитаются нормально.
+    if not np.isfinite(all_embeddings).all():
+        bad = ~np.isfinite(all_embeddings).all(axis=1)
+        print(
+            f"[embed] {int(bad.sum())} эмбеддингов содержат NaN/inf, обнулены",
+            file=sys.stderr, flush=True,
+        )
+        all_embeddings[bad] = 0.0
 
     return all_embeddings
