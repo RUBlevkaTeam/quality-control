@@ -1,0 +1,42 @@
+{
+  "protocol": "leave-one-product-out direct neighbours; no transitive components",
+  "backend": "cpp",
+  "max_distance": 4,
+  "top_k": 128,
+  "native_query_seconds": {
+    "БАД": 0.367002874991158,
+    "Легковоспламеняющиеся": 0.2140017500205431
+  },
+  "categories": {
+    "БАД": {
+      "calls": 1252,
+      "accuracy": 0.987220447284345,
+      "tp": 1055,
+      "fp": 9,
+      "fn": 7,
+      "coverage": 0.16762618824474496,
+      "reasons": {
+        "exact_sha256_observe": 1882,
+        "image_abstain": 3565,
+        "exact_sha256_multi_name": 1212,
+        "exact_sha256_conflict": 770,
+        "dhash_name_positive": 40
+      }
+    },
+    "Легковоспламеняющиеся": {
+      "calls": 78,
+      "accuracy": 1.0,
+      "tp": 11,
+      "fp": 0,
+      "fn": 0,
+      "coverage": 0.014176663031624863,
+      "reasons": {
+        "exact_sha256_observe": 3200,
+        "image_abstain": 2204,
+        "dhash_name_negative": 67,
+        "exact_sha256_conflict": 20,
+        "dhash_name_positive": 11
+      }
+    }
+  }
+}

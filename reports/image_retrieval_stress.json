@@ -1,0 +1,38 @@
+{
+  "protocol": "stratified 70/30 product split; text model refit on train; retrieval index restricted to train",
+  "selection_seeds": [2026, 2027, 2028, 2029, 2030],
+  "confirmation_seeds": [3030, 3031, 3032],
+  "selection": {
+    "БАД": {
+      "text_f1": 0.9495378639148238,
+      "hybrid_f1": 0.9513998509758529,
+      "mean_flips": 8.6,
+      "mean_corrected": 7.2,
+      "mean_harmed": 1.4
+    },
+    "Легковоспламеняющиеся": {
+      "text_f1": 0.8454563498205215,
+      "hybrid_f1": 0.8454563498205215,
+      "mean_flips": 0.0
+    },
+    "mean_f1_text": 0.8974971068676727,
+    "mean_f1_hybrid": 0.8984281003981872
+  },
+  "confirmation": {
+    "БАД": {
+      "text_f1": 0.9508329931737908,
+      "hybrid_f1": 0.9519218371430427,
+      "mean_flips": 6.666666666666667,
+      "mean_corrected": 5.0,
+      "mean_harmed": 1.6666666666666667
+    },
+    "Легковоспламеняющиеся": {
+      "text_f1": 0.7906865069670973,
+      "hybrid_f1": 0.7906865069670973,
+      "mean_flips": 0.0
+    },
+    "mean_f1_text": 0.870759750070444,
+    "mean_f1_hybrid": 0.87130417205507
+  },
+  "warning": "Public leaderboard effect is unknown; confirmation folds were not used to select the gate."
+}

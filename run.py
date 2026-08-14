@@ -30,6 +30,7 @@ from src.utils_postprocess import format_results
 ROOT = Path(__file__).resolve().parent
 CLASSIFIER_PATH = ROOT / "baseline_qwen3vl_bf16.joblib"
 TEXT_MODEL_PATH = ROOT / "text_model.joblib"
+IMAGE_RETRIEVAL_PATH = ROOT / "image_retrieval.npz"
 
 _SHARED_MODELS_DIR = Path(os.environ.get("SHARED_MODELS_PATH", "/shared_models"))
 MODEL_EMBED_PATH = _SHARED_MODELS_DIR / "Qwen/Qwen3-VL-Embedding-2B"
@@ -88,6 +89,26 @@ def _generate(current_df):
     )
 
 
+def _apply_retrieval(current_df):
+    from src.image_retrieval import (
+        ImageRetrievalIndex,
+        apply_image_retrieval,
+        load_retrieval_index,
+    )
+
+    retrieval = ImageRetrievalIndex(load_retrieval_index(IMAGE_RETRIEVAL_PATH))
+    result = apply_image_retrieval(
+        current_df,
+        current_df["logreg_prob"].tolist(),
+        current_df["pred"].tolist(),
+        retrieval,
+    )
+    current_df["logreg_prob"] = result["probabilities"]
+    current_df["pred"] = result["predictions"]
+    current_df["retrieval_reason"] = result["reasons"]
+    return result
+
+
 def main() -> None:
     args = _parse_args()
     data_path = Path(args.test_data_path)
@@ -135,6 +156,17 @@ def main() -> None:
             traceback.print_exc(file=sys.stderr)
             current_df["logreg_prob"] = [0.0] * n
             current_df["pred"] = [0] * n
+
+    try:
+        retrieval_result = _apply_retrieval(current_df)
+        changed = int((retrieval_result["reasons"] != "text_model").sum())
+        _log(
+            f"image retrieval: backend={retrieval_result['backend']}, "
+            f"решений={changed}"
+        )
+    except Exception as exc:
+        _log(f"image retrieval недоступен ({type(exc).__name__}: {exc}), оставляем text pred")
+        traceback.print_exc(file=sys.stderr)
 
     positives = int(sum(current_df["pred"]))
     _log(f"pred=1 у {positives} из {n}")
