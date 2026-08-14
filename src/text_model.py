@@ -17,10 +17,14 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from src.rule_features import rule_feature_matrix
 from src.utils_data_prep import _clean
 from src.utils_logreg import ProductQualityPredictor, _norm_category
 
-TEXT_MODEL_FORMAT_VERSION = 1
+TEXT_MODEL_FORMAT_VERSION = 2
+
+# вес rule-признаков относительно TF-IDF, как у ultra (проверено её 0.8)
+_RULE_WEIGHT = 2.0
 
 # Название повторено трижды: для TF-IDF это вес признаков заголовка.
 # Замер на data.csv: +0.010 среднего F1, почти весь прирост на редкой
@@ -40,6 +44,18 @@ def build_model_texts(df: pd.DataFrame) -> pd.Series:
     desc = desc.reset_index(drop=True)
     title = ("Название: " + name + " ") * _TITLE_REPEATS
     return (title + "Описание: " + desc).str.strip()
+
+
+# TF-IDF + rule-признаки одной sparse-матрицей; используется и в train, и в predict
+def _build_features(vectorizer, texts, df: pd.DataFrame, fit: bool):
+    from scipy import sparse
+
+    tfidf = vectorizer.fit_transform(texts) if fit else vectorizer.transform(texts)
+    names = df["name"].tolist() if "name" in df.columns else [""] * len(df)
+    descs = df["description"].tolist() if "description" in df.columns else [""] * len(df)
+    cats = df["category"].tolist() if "category" in df.columns else [""] * len(df)
+    rules = rule_feature_matrix(names, descs, cats) * np.float32(_RULE_WEIGHT)
+    return sparse.hstack((tfidf, sparse.csr_matrix(rules)), format="csr")
 
 
 # Точный поиск порога: F1 меняется только на наблюдаемых значениях
@@ -80,23 +96,26 @@ class TextQualityModel:
         self,
         train_df: pd.DataFrame,
         *,
+        families: pd.Series | None = None,
         c_grid: Sequence[float] = (0.3, 1.0, 3.0),
         n_splits: int = 5,
         random_state: int = 42,
     ) -> Dict[str, dict]:
-        from sklearn.feature_extraction.text import TfidfVectorizer
+        """families: Series id -> family. С ней фолды режутся по семействам
+        почти-дублей (53% товаров в семействах!) - без этого OOF завышен:
+        0.871 против 0.687 на лидерборде."""
         from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import StratifiedKFold, cross_val_predict
-        from sklearn.pipeline import make_pipeline
+        from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
         self.category_models = {}
         report: Dict[str, dict] = {}
+        fam_by_id = None if families is None else dict(zip(families["id"], families["family"]))
 
         for category in train_df["category"].dropna().unique():
             subset = train_df[train_df["category"] == category]
             # дедуп тот же, что у эмбеддингового классификатора: точные копии
             # с одинаковой меткой рвутся сплитом и завышают OOF
-            subset = ProductQualityPredictor._dedup(subset)
+            subset = ProductQualityPredictor._dedup(subset).reset_index(drop=True)
 
             texts = build_model_texts(subset).values
             y = np.asarray(subset["label"].values, dtype=np.int64)
@@ -106,14 +125,24 @@ class TextQualityModel:
                 continue
 
             splits = max(2, min(n_splits, n_pos))
+            if fam_by_id is not None:
+                groups = np.asarray([fam_by_id.get(i, -1) for i in subset["id"]])
+                cv = StratifiedGroupKFold(splits, shuffle=True, random_state=random_state)
+                folds = list(cv.split(texts, y, groups))
+            else:
+                cv = StratifiedKFold(splits, shuffle=True, random_state=random_state)
+                folds = list(cv.split(texts, y))
+
             best = None
             for C in c_grid:
-                pipe = make_pipeline(
-                    self._make_vectorizer(),
-                    LogisticRegression(C=C, max_iter=2000, class_weight="balanced"),
-                )
-                cv = StratifiedKFold(splits, shuffle=True, random_state=random_state)
-                oof = cross_val_predict(pipe, texts, y, cv=cv, method="predict_proba")[:, 1]
+                oof = np.zeros(len(y), dtype=np.float64)
+                for tr, va in folds:
+                    vec = self._make_vectorizer()
+                    x_tr = _build_features(vec, texts[tr], subset.iloc[tr], fit=True)
+                    x_va = _build_features(vec, texts[va], subset.iloc[va], fit=False)
+                    clf = LogisticRegression(C=C, max_iter=2000, class_weight="balanced")
+                    clf.fit(x_tr, y[tr])
+                    oof[va] = clf.predict_proba(x_va)[:, 1]
                 f1, threshold = exact_best_threshold(oof, y)
                 if best is None or f1 > best["oof_f1"]:
                     best = {"oof_f1": f1, "threshold": threshold, "C": C}
@@ -122,7 +151,7 @@ class TextQualityModel:
                 raise RuntimeError(f"{category}: ни одна конфигурация не дала F1 > 0")
 
             vectorizer = self._make_vectorizer()
-            matrix = vectorizer.fit_transform(texts)
+            matrix = _build_features(vectorizer, texts, subset, fit=True)
             classifier = LogisticRegression(
                 C=best["C"], max_iter=2000, class_weight="balanced"
             )
@@ -195,7 +224,8 @@ class TextQualityModel:
                 unknown += len(positions)
                 continue
             index = np.asarray(positions, dtype=np.int64)
-            matrix = info["vectorizer"].transform(texts[index])
+            sub = df.iloc[index]
+            matrix = _build_features(info["vectorizer"], texts[index], sub, fit=False)
             block = info["classifier"].predict_proba(matrix)[:, 1]
             probs[index] = block
             preds[index] = (block >= float(info["threshold"])).astype(np.int64)
@@ -256,20 +286,23 @@ class TextQualityModel:
 # Обучение из командной строки:
 #   venv312/bin/python -m src.text_model data.csv text_model.joblib
 def _main(argv: Sequence[str]) -> None:
-    if len(argv) != 2:
-        raise SystemExit("использование: python -m src.text_model <data.csv> <выходной.joblib>")
+    if len(argv) not in (2, 3):
+        raise SystemExit(
+            "использование: python -m src.text_model <data.csv> <выходной.joblib> [families.csv]"
+        )
     # при запуске через -m этот модуль называется __main__, и класс запиклился
     # бы как __main__.TextQualityModel - такой артефакт не загрузится из run.py.
     # Импортируем класс под каноническим именем модуля.
     from src.text_model import TextQualityModel as CanonicalTextQualityModel
 
-    data_path, out_path = argv
+    data_path, out_path = argv[0], argv[1]
+    families = pd.read_csv(argv[2]) if len(argv) == 3 else None
     df = pd.read_csv(data_path)
     junk = [c for c in df.columns if str(c).startswith("Unnamed:")]
     if junk:
         df = df.drop(columns=junk)
     model = CanonicalTextQualityModel()
-    model.train(df)
+    model.train(df, families=families)
     model.save(out_path)
     _log(f"артефакт сохранён: {out_path}")
 
