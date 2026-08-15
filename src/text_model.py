@@ -17,14 +17,23 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from src.rule_features import rule_feature_matrix
+from src.retrieval_memory import RetrievalMemory, absence_veto_mask
+from src.rule_features import FLAMMABLE_CATEGORY, rule_feature_matrix
 from src.utils_data_prep import _clean
 from src.utils_logreg import ProductQualityPredictor, _norm_category
 
-TEXT_MODEL_FORMAT_VERSION = 2
+TEXT_MODEL_FORMAT_VERSION = 3
 
 # вес rule-признаков относительно TF-IDF, как у ultra (проверено её 0.8)
 _RULE_WEIGHT = 2.0
+
+# C=3.0 побеждал во всех замерах на групповой CV (обе категории, оба векторизатора)
+_C = 3.0
+
+# два взгляда на текст: word ловит термины, char_wb - морфологию внутри
+# незнакомых слов (обобщение на новые бренды). Среднее их вероятностей дало
+# +0.005 среднего F1 на групповой CV (редкий класс 0.764 -> 0.772)
+_VECTORIZERS = ("word", "char")
 
 # Название повторено трижды: для TF-IDF это вес признаков заголовка.
 # Замер на data.csv: +0.010 среднего F1, почти весь прирост на редкой
@@ -97,7 +106,6 @@ class TextQualityModel:
         train_df: pd.DataFrame,
         *,
         families: pd.Series | None = None,
-        c_grid: Sequence[float] = (0.3, 1.0, 3.0),
         n_splits: int = 5,
         random_state: int = 42,
     ) -> Dict[str, dict]:
@@ -133,46 +141,51 @@ class TextQualityModel:
                 cv = StratifiedKFold(splits, shuffle=True, random_state=random_state)
                 folds = list(cv.split(texts, y))
 
-            best = None
-            for C in c_grid:
-                oof = np.zeros(len(y), dtype=np.float64)
-                for tr, va in folds:
-                    vec = self._make_vectorizer()
+            # OOF для каждого векторизатора, порог подбирается на их среднем -
+            # ровно та вероятность, что будет на инференсе
+            oof = {kind: np.zeros(len(y), dtype=np.float64) for kind in _VECTORIZERS}
+            for tr, va in folds:
+                for kind in _VECTORIZERS:
+                    vec = self._make_vectorizer(kind)
                     x_tr = _build_features(vec, texts[tr], subset.iloc[tr], fit=True)
                     x_va = _build_features(vec, texts[va], subset.iloc[va], fit=False)
-                    clf = LogisticRegression(C=C, max_iter=2000, class_weight="balanced")
+                    clf = LogisticRegression(C=_C, max_iter=2000, class_weight="balanced")
                     clf.fit(x_tr, y[tr])
-                    oof[va] = clf.predict_proba(x_va)[:, 1]
-                f1, threshold = exact_best_threshold(oof, y)
-                if best is None or f1 > best["oof_f1"]:
-                    best = {"oof_f1": f1, "threshold": threshold, "C": C}
+                    oof[kind][va] = clf.predict_proba(x_va)[:, 1]
+            oof_mean = np.mean([oof[k] for k in _VECTORIZERS], axis=0)
+            oof_f1, threshold = exact_best_threshold(oof_mean, y)
+            if oof_f1 <= 0.0:
+                raise RuntimeError(f"{category}: OOF F1 = 0, порог подбирать не на чем")
 
-            if best is None or best["oof_f1"] <= 0.0:
-                raise RuntimeError(f"{category}: ни одна конфигурация не дала F1 > 0")
+            heads = {}
+            for kind in _VECTORIZERS:
+                vec = self._make_vectorizer(kind)
+                matrix = _build_features(vec, texts, subset, fit=True)
+                clf = LogisticRegression(C=_C, max_iter=2000, class_weight="balanced")
+                clf.fit(matrix, y)
+                heads[kind] = {"vectorizer": vec, "classifier": clf}
 
-            vectorizer = self._make_vectorizer()
-            matrix = _build_features(vectorizer, texts, subset, fit=True)
-            classifier = LogisticRegression(
-                C=best["C"], max_iter=2000, class_weight="balanced"
-            )
-            classifier.fit(matrix, y)
+            # retrieval-память: групповой OOF её вклад не видит по построению
+            # (дубли всегда в одном фолде), включается как страховка - перенос
+            # метки только при единогласии/чистоте, на train точность 0.9992
+            memory = RetrievalMemory().fit(subset)
 
             self.category_models[category] = {
-                "vectorizer": vectorizer,
-                "classifier": classifier,
-                "threshold": best["threshold"],
-                "C": best["C"],
-                "oof_f1": best["oof_f1"],
+                "heads": heads,
+                "memory": memory,
+                "threshold": threshold,
+                "C": _C,
+                "oof_f1": oof_f1,
                 "n_train": int(len(y)),
                 "n_pos": n_pos,
             }
             report[category] = {
                 k: v for k, v in self.category_models[category].items()
-                if k not in ("vectorizer", "classifier")
+                if k not in ("heads", "memory")
             }
             _log(
-                f"{category}: OOF F1={best['oof_f1']:.4f}, порог={best['threshold']:.4f}, "
-                f"C={best['C']:g}, n={len(y)} (позитивов {n_pos})"
+                f"{category}: OOF F1={oof_f1:.4f} (ансамбль {'+'.join(_VECTORIZERS)}), "
+                f"порог={threshold:.4f}, n={len(y)} (позитивов {n_pos}), {memory.summary()}"
             )
 
         if report:
@@ -182,15 +195,22 @@ class TextQualityModel:
         return report
 
     @staticmethod
-    def _make_vectorizer():
+    def _make_vectorizer(kind: str = "word"):
         from sklearn.feature_extraction.text import TfidfVectorizer
 
-        # word 1-2 граммы: по замерам не уступают char_wb 3-6 (0.8610 против
-        # 0.8611), но обучаются и применяются в ~7 раз быстрее
+        if kind == "word":
+            return TfidfVectorizer(
+                analyzer="word",
+                ngram_range=(1, 2),
+                min_df=3,
+                sublinear_tf=True,
+                dtype=np.float32,
+            )
         return TfidfVectorizer(
-            analyzer="word",
-            ngram_range=(1, 2),
+            analyzer="char_wb",
+            ngram_range=(3, 5),
             min_df=3,
+            max_features=300_000,
             sublinear_tf=True,
             dtype=np.float32,
         )
@@ -218,6 +238,7 @@ class TextQualityModel:
             groups.setdefault(key, []).append(i)
 
         unknown = 0
+        memory_hits = 0
         for key, positions in groups.items():
             info = heads.get(key)
             if info is None:
@@ -225,11 +246,42 @@ class TextQualityModel:
                 continue
             index = np.asarray(positions, dtype=np.int64)
             sub = df.iloc[index]
-            matrix = _build_features(info["vectorizer"], texts[index], sub, fit=False)
-            block = info["classifier"].predict_proba(matrix)[:, 1]
+
+            # 1) ансамбль: среднее вероятностей word- и char-голов
+            block = np.zeros(len(index), dtype=np.float64)
+            for head in info["heads"].values():
+                matrix = _build_features(head["vectorizer"], texts[index], sub, fit=False)
+                block += head["classifier"].predict_proba(matrix)[:, 1]
+            block /= len(info["heads"])
+
+            # 2) retrieval-память: точное совпадение с train перекрывает модель
+            memory = info.get("memory")
+            if memory is not None:
+                try:
+                    got, _src = memory.lookup(sub)
+                    for j, g in enumerate(got):
+                        if g is not None:
+                            block[j] = 1.0 - 1e-5 if int(g) == 1 else 1e-5
+                            memory_hits += 1
+                except Exception as exc:
+                    _log(f"память недоступна ({type(exc).__name__}: {exc}), продолжаю без неё")
+
             probs[index] = block
             preds[index] = (block >= float(info["threshold"])).astype(np.int64)
 
+        # 3) absence veto: «топливо не входит в комплект» у легковоспламеняющихся ->
+        # принудительный pred=0. На train: 1208 срабатываний, 0 убитых позитивов.
+        try:
+            veto = absence_veto_mask(df)
+            if veto.any():
+                probs[veto] = 1e-5
+                preds[veto] = 0
+                _log(f"veto применён к {int(veto.sum())} товарам")
+        except Exception as exc:
+            _log(f"veto недоступен ({type(exc).__name__}: {exc}), продолжаю без него")
+
+        if memory_hits:
+            _log(f"память перенесла вердикт для {memory_hits} товаров")
         if unknown:
             _log(f"{unknown} товаров с неизвестной категорией -> pred=0")
         return probs.tolist(), preds.tolist()
@@ -239,7 +291,7 @@ class TextQualityModel:
             return "текстовая модель пуста"
         parts = [
             f"{name}: порог {info['threshold']:.3f}, "
-            f"словарь {len(info['vectorizer'].vocabulary_)}, OOF {info.get('oof_f1', 0):.3f}"
+            f"голов {len(info['heads'])}, OOF {info.get('oof_f1', 0):.3f}"
             for name, info in self.category_models.items()
         ]
         return "; ".join(parts)
@@ -275,9 +327,13 @@ class TextQualityModel:
         if not getattr(model, "category_models", None):
             raise ValueError("в артефакте нет ни одной категории")
         for name, info in model.category_models.items():
-            for key in ("vectorizer", "classifier", "threshold"):
+            for key in ("heads", "threshold"):
                 if key not in info:
                     raise ValueError(f"{name!r}: в артефакте нет поля {key!r}")
+            for kind, head in info["heads"].items():
+                for part in ("vectorizer", "classifier"):
+                    if part not in head:
+                        raise ValueError(f"{name!r}/{kind}: нет поля {part!r}")
             threshold = float(info["threshold"])
             if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
                 raise ValueError(f"{name!r}: некорректный порог {threshold}")
@@ -297,10 +353,14 @@ def _main(argv: Sequence[str]) -> None:
 
     data_path, out_path = argv[0], argv[1]
     families = pd.read_csv(argv[2]) if len(argv) == 3 else None
-    df = pd.read_csv(data_path)
-    junk = [c for c in df.columns if str(c).startswith("Unnamed:")]
-    if junk:
-        df = df.drop(columns=junk)
+    # prepare_dataframe, а не голый read_csv: без image_paths память
+    # не построит SHA/dHash-ключи и будет работать только по тексту
+    from pathlib import Path
+
+    from src.utils_data_prep import prepare_dataframe
+
+    data_path = Path(data_path)
+    df = prepare_dataframe(data_path, data_path.parent / "images")
     model = CanonicalTextQualityModel()
     model.train(df, families=families)
     model.save(out_path)
