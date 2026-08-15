@@ -56,4 +56,6 @@ pip-wheel-metadata/
 test.ipynb
 podchet.py
 /ecup_quality_ultra
+/cache/
+/native/libhashmatch_darwin_*.dylib
 /ECUP_QUALITY_AGENT_BUNDLE/
