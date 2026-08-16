@@ -53,28 +53,73 @@ def _generate_batch(
 
 
 _SYSTEM_PROMPT = (
-    "You are a helpful product analyst. Be concise and strictly follow formatting instructions. "
-    "Do NOT output any thinking process, reasoning, or thinking tags. Output only the final answer."
+    "Ты модератор маркетплейса. Пишешь короткие объяснения вердиктов проверки "
+    "товаров. Отвечай одним предложением на русском, 120-250 символов, без "
+    "переносов строк, без тегов и рассуждений - только готовое объяснение."
 )
 
+# Вердикт зафиксирован классификатором до генерации - LLM объясняет, а не решает.
 _USER_PROMPT_TEMPLATE = (
-    "Перед нами {pred_label} продукт в онлайн магазине.\n"
-    "Описание продукта: {text}\n\n"
-    "Напиши краткое объяснение почему этот продукт {pred_label_lower} за 30 слов или короче. "
-    "Используй русский язык."
+    "Категория проверки: {category}.\n"
+    "Правило: {rule}\n"
+    "Карточка товара: {text}\n\n"
+    "Вердикт проверки: {verdict}. {evidence}\n"
+    "Напиши одно предложение, объясняющее этот вердикт для проверяющего "
+    "сотрудника со ссылкой на данные карточки. Вердикт менять нельзя."
 )
+
+_RULES = {
+    "БАД": (
+        "товар относится к биологически активным добавкам, если карточка "
+        "содержит маркировку БАД/биологически активной добавки; спортивное "
+        "питание и товары без маркировки к БАД не относятся"
+    ),
+    "Легковоспламеняющиеся": (
+        "товар относится к легковоспламеняющимся, если он сам является "
+        "горючим веществом, пиротехникой или продаётся с топливом в комплекте; "
+        "пустые устройства без топлива к категории не относятся"
+    ),
+}
+
+
+# короткая сводка найденных правилами оснований - чтобы LLM не выдумывала факты
+def _evidence_summary(name: object, description: object, prediction: int) -> str:
+    try:
+        from src.rule_features import evidence_flags
+
+        flags = evidence_flags(name, description)
+    except Exception:
+        return ""
+    facts = []
+    if flags.get("bad_marker"):
+        facts.append("в карточке есть маркировка БАД")
+    if flags.get("not_bad"):
+        facts.append("есть прямое указание, что товар не является БАД")
+    if flags.get("sports"):
+        facts.append("товар выглядит как спортивное питание")
+    if flags.get("standalone"):
+        facts.append("товар - самостоятельное горючее или пиротехника")
+    if flags.get("fuel") and flags.get("included"):
+        facts.append("топливо или газ входит в комплект")
+    if flags.get("empirical_absence_veto"):
+        facts.append("топливо или газ в комплект не входит")
+    if flags.get("component_or_accessory"):
+        facts.append("это аксессуар или негорючий компонент")
+    if not facts:
+        return ""
+    return "Основания: " + "; ".join(facts[:3]) + "."
 
 
 # Helper to build chat template prompt for a single sample
-def _build_prompt(text: str, logreg_prob: float, tokenizer) -> str:
-    
-    pred_label = "хороший" if logreg_prob >= 0.5 else "плохой"
-    pred_label_lower = pred_label.lower()
-
+def _build_prompt(row, tokenizer) -> str:
+    prediction = int(row.get("pred", 0) or 0)
+    category = str(row.get("category", ""))
     user_text = _USER_PROMPT_TEMPLATE.format(
-        pred_label=pred_label,
-        pred_label_lower=pred_label_lower,
-        text=text,
+        category=category,
+        rule=_RULES.get(category, "правила категории площадки"),
+        text=str(row.get("text", ""))[:2400],
+        verdict="не бан" if prediction == 1 else "бан",
+        evidence=_evidence_summary(row.get("name"), row.get("description"), prediction),
     )
 
     messages = [
@@ -142,10 +187,7 @@ def generate_comments_cuda(
         # Collect prompts
         prompts_list = []
         for _, row in batch_df.iterrows():
-            text = row.get('text', '') or ''
-            # Do we tweak it? Tinker with it and maybe the score improves :idk:
-            prob = row.get('pred', 0.0) if hasattr(row, 'pred') else 0.0
-            prompts_list.append(_build_prompt(text, prob, tokenizer))
+            prompts_list.append(_build_prompt(row, tokenizer))
 
         # Generate in one batch call
         batch_comments = _generate_batch(

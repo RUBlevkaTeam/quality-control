@@ -22,7 +22,11 @@ from src.rule_features import (
     build_model_texts as build_normalized_model_texts,
     rule_feature_matrix,
 )
-from src.retrieval_memory import RetrievalMemory, absence_veto_mask
+from src.retrieval_memory import (
+    RetrievalMemory,
+    absence_veto_mask,
+    strict_positive_mask,
+)
 from src.utils_data_prep import _clean
 from src.utils_logreg import ProductQualityPredictor, _norm_category
 
@@ -40,6 +44,13 @@ _RICH_MODE = "word_char_title_rules"
 # Замер на data.csv: +0.010 среднего F1, почти весь прирост на редкой
 # категории (0.797 -> 0.818).
 _TITLE_REPEATS = 3
+
+# Полный двусторонний memory-lookup (текст/SHA/dHash). Выключен для
+# изоляционного замера: сабмит со всеми слоями дал 0.77196 против 0.77329
+# у базы, а это единственный компонент без OOF-замера (групповые фолды его
+# не видят по построению). Негативная desc-память НЕ под этим флагом - её
+# вклад замерен отдельно (fire +0.006..0.012, исправлено/испорчено 10/0).
+_USE_FULL_MEMORY = False
 
 
 def _log(message: str) -> None:
@@ -140,6 +151,7 @@ class TextQualityModel:
         c_grid: Sequence[float] = (0.3, 1.0, 3.0),
         n_splits: int = 5,
         random_state: int = 42,
+        extra_threshold_seeds: Sequence[int] = (3030, 3031, 3032),
     ) -> Dict[str, dict]:
         """families: Series id -> family. С ней фолды режутся по семействам
         почти-дублей (53% товаров в семействах!) - без этого OOF завышен:
@@ -191,6 +203,38 @@ class TextQualityModel:
 
             if best is None or best["oof_f1"] <= 0.0:
                 raise RuntimeError(f"{category}: ни одна конфигурация не дала F1 > 0")
+
+            # Multi-seed порог: разбиение с одним seed даёт шумный порог на
+            # 143 позитивах (у нас же измерено: std порога ~0.05-0.1). Медиана
+            # по 4 независимым разбиениям устойчивее - важно перед private.
+            if extra_threshold_seeds and fam_by_id is not None:
+                thresholds = [best["threshold"]]
+                f1s = [best["oof_f1"]]
+                for seed in extra_threshold_seeds:
+                    cv2 = StratifiedGroupKFold(splits, shuffle=True, random_state=seed)
+                    oof2 = np.zeros(len(y), dtype=np.float64)
+                    for tr, va in cv2.split(subset, y, groups):
+                        features = self._make_feature_bundle(category)
+                        x_tr = self._build_category_features(
+                            category, features, subset.iloc[tr], fit=True
+                        )
+                        x_va = self._build_category_features(
+                            category, features, subset.iloc[va], fit=False
+                        )
+                        clf = self._make_classifier(category, best["C"])
+                        clf.fit(x_tr, y[tr])
+                        oof2[va] = clf.predict_proba(x_va)[:, 1]
+                    f1_2, thr_2 = exact_best_threshold(oof2, y)
+                    thresholds.append(thr_2)
+                    f1s.append(f1_2)
+                best["threshold"] = float(np.median(thresholds))
+                best["oof_f1"] = float(np.mean(f1s))
+                best["threshold_seeds"] = [random_state, *extra_threshold_seeds]
+                _log(
+                    f"{category}: multi-seed пороги {np.round(thresholds, 4).tolist()} "
+                    f"-> медиана {best['threshold']:.4f}; F1 по сидам "
+                    f"{np.round(f1s, 4).tolist()}"
+                )
 
             features = self._make_feature_bundle(category)
             matrix = self._build_category_features(category, features, subset, fit=True)
@@ -307,7 +351,15 @@ class TextQualityModel:
             "class_weight": "balanced",
         }
         if str(category) == FLAMMABLE_CATEGORY:
-            kwargs.update(solver="liblinear", random_state=2026)
+            # фиксированный вес позитива 40 вместо balanced (~13.7): меняет
+            # ранжирование редких позитивов, порог после этого отделяет
+            # уверенные fire-товары чище. Family-folds по 4 seed:
+            # fire-F1 0.79267 -> 0.79757, улучшение на каждом seed.
+            kwargs.update(
+                solver="liblinear",
+                random_state=2026,
+                class_weight={0: 1, 1: 40},
+            )
         return LogisticRegression(**kwargs)
 
     # ------------------------------------------------------------------
@@ -346,7 +398,7 @@ class TextQualityModel:
 
             # retrieval-память: точное совпадение с train перекрывает модель
             memory = info.get("memory")
-            if memory is not None:
+            if memory is not None and _USE_FULL_MEMORY:
                 try:
                     got, _src = memory.lookup(sub)
                     hits = sum(1 for g in got if g is not None)
@@ -358,8 +410,29 @@ class TextQualityModel:
                 except Exception as exc:
                     _log(f"память недоступна ({type(exc).__name__}: {exc}), продолжаю без неё")
 
+            # негативный desc-lookup: только fire, только в сторону pred=0
+            if memory is not None and key == _norm_category(FLAMMABLE_CATEGORY):
+                try:
+                    neg = memory.negative_desc_mask(sub)
+                    if neg.any():
+                        block[neg] = np.minimum(block[neg], 1e-5)
+                        _log(f"neg-desc память обнулила {int(neg.sum())} товаров")
+                except Exception as exc:
+                    _log(f"neg-desc память недоступна ({type(exc).__name__}: {exc})")
+
             probs[index] = block
             preds[index] = (block >= float(info["threshold"])).astype(np.int64)
+
+        # strict positive: высокоточное fire-семейство (37/37 на train) -> pred=1;
+        # применяется ДО veto, чтобы veto оставался сильнее при пересечении
+        try:
+            pos = strict_positive_mask(df)
+            if pos.any():
+                probs[pos] = np.maximum(probs[pos], 1.0 - 1e-5)
+                preds[pos] = 1
+                _log(f"strict-positive применён к {int(pos.sum())} товарам")
+        except Exception as exc:
+            _log(f"strict-positive недоступен ({type(exc).__name__}: {exc})")
 
         # absence veto: «топливо не входит в комплект» у легковоспламеняющихся ->
         # принудительный pred=0. На train: 1208 срабатываний, 0 убитых позитивов.
@@ -439,9 +512,10 @@ class TextQualityModel:
 # Обучение из командной строки:
 #   venv312/bin/python -m src.text_model data.csv text_model.joblib
 def _main(argv: Sequence[str]) -> None:
-    if len(argv) not in (2, 3):
+    if len(argv) not in (2, 3, 4):
         raise SystemExit(
-            "использование: python -m src.text_model <data.csv> <выходной.joblib> [families.csv]"
+            "использование: python -m src.text_model <data.csv> <выходной.joblib> "
+            "[families.csv] [label_corrections.csv]"
         )
     # при запуске через -m этот модуль называется __main__, и класс запиклился
     # бы как __main__.TextQualityModel - такой артефакт не загрузится из run.py.
@@ -449,7 +523,7 @@ def _main(argv: Sequence[str]) -> None:
     from src.text_model import TextQualityModel as CanonicalTextQualityModel
 
     data_path, out_path = argv[0], argv[1]
-    families = pd.read_csv(argv[2]) if len(argv) == 3 else None
+    families = pd.read_csv(argv[2]) if len(argv) >= 3 else None
     # prepare_dataframe, а не голый read_csv: без image_paths память
     # не построит SHA/dHash-ключи и будет работать только по тексту
     from pathlib import Path
@@ -458,6 +532,15 @@ def _main(argv: Sequence[str]) -> None:
 
     data_path = Path(data_path)
     df = prepare_dataframe(data_path, data_path.parent / "images")
+
+    # ручной арбитраж конфликтных семейств (одинаковый контент, разные метки):
+    # правки применяются к обучению и к памяти, файл - артефакт решения
+    if len(argv) == 4:
+        corrections = pd.read_csv(argv[3])
+        fix = dict(zip(corrections["id"], corrections["corrected_label"]))
+        mask = df["id"].isin(fix)
+        df.loc[mask, "label"] = df.loc[mask, "id"].map(fix)
+        _log(f"применено {int(mask.sum())} правок разметки из {argv[3]}")
     model = CanonicalTextQualityModel()
     model.train(df, families=families)
     model.save(out_path)

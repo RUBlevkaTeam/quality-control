@@ -36,6 +36,16 @@ def _norm_key(name: object, desc: object) -> str:
     return key
 
 
+# BLAKE2b-128 дайджест нормализованного ОПИСАНИЯ: в артефакт едет 16 байт,
+# а не сам текст. Пустое описание -> None (пустоту запоминать нельзя).
+def _desc_digest(desc: object) -> bytes | None:
+    text = "" if desc is None or desc != desc else str(desc)
+    norm = _NORM_RE.sub("", text.lower())
+    if not norm:
+        return None
+    return hashlib.blake2b(norm.encode("utf-8"), digest_size=16).digest()
+
+
 def _main_image(row) -> str | None:
     paths = row.get("image_paths")
     if isinstance(paths, (list, tuple)) and paths:
@@ -72,17 +82,26 @@ class RetrievalMemory:
         self.sha_labels: Dict[str, int] = {}
         self.dhash_matrix = np.zeros((0, 32), dtype=np.uint8)
         self.dhash_labels = np.zeros(0, dtype=np.int8)
+        # дайджесты описаний, у которых ВСЕ train-метки = 0 (для negative lookup)
+        self.neg_desc_digests: set = set()
 
     # --- обучение (офлайн) ---
 
     def fit(self, df: pd.DataFrame, *, with_images: bool = True) -> "RetrievalMemory":
         by_text: Dict[str, set] = defaultdict(set)
+        by_desc: Dict[bytes, set] = defaultdict(set)
         for _, row in df.iterrows():
             key = _norm_key(row.get("name"), row.get("description"))
             if key and key != "||":
                 by_text[key].add(int(row["label"]))
+            digest = _desc_digest(row.get("description"))
+            if digest is not None:
+                by_desc[digest].add(int(row["label"]))
         # переносим метку только при единогласии: конфликтная разметка не память
         self.text_labels = {k: v.pop() for k, v in by_text.items() if len(v) == 1}
+        # описания, где train единогласно говорит 0: конфликт или наличие
+        # хоть одной метки 1 исключает дайджест из негативной памяти
+        self.neg_desc_digests = {d for d, ls in by_desc.items() if ls == {0}}
 
         if with_images and "image_paths" in df.columns:
             by_sha: Dict[str, set] = defaultdict(set)
@@ -160,10 +179,25 @@ class RetrievalMemory:
                     source[i] = "dhash"
         return found, source
 
+    # Негативный lookup по описанию: True там, где описание непустое, точно
+    # найдено в train и ВСЕ его train-метки = 0. Только в сторону pred=0 -
+    # редкий позитив этим убить нельзя по построению. Family-folds по 4 seed:
+    # fire-F1 +0.006..0.012, исправлено/испорчено 10/0.
+    def negative_desc_mask(self, df: pd.DataFrame) -> np.ndarray:
+        mask = np.zeros(len(df), dtype=bool)
+        if not self.neg_desc_digests:
+            return mask
+        for i, (_, row) in enumerate(df.iterrows()):
+            digest = _desc_digest(row.get("description"))
+            if digest is not None and digest in self.neg_desc_digests:
+                mask[i] = True
+        return mask
+
     def summary(self) -> str:
         return (
             f"память: текстовых ключей {len(self.text_labels)}, "
-            f"sha {len(self.sha_labels)}, dhash {len(self.dhash_labels)}"
+            f"sha {len(self.sha_labels)}, dhash {len(self.dhash_labels)}, "
+            f"neg-desc {len(self.neg_desc_digests)}"
         )
 
 
@@ -184,5 +218,27 @@ def absence_veto_mask(df: pd.DataFrame) -> np.ndarray:
             continue
         text = f"{normalize_text(row.get('name'))} {normalize_text(row.get('description'))}"
         if _ABSENCE_VETO_RE.search(text) and not _REFILLABLE_RE.search(text):
+            mask[i] = True
+    return mask
+
+
+# Зеркальный позитивный override: высокоточное семейство fire-позитивов
+# (пиротехника с ГОСТ, газ для заправки зажигалок, дымовые шашки и т.п.).
+# На train: 37 срабатываний, все 37 - label=1. OOF не меняет (модель их и так
+# ловит), включён как страховка от пропуска незнакомых брендов на тесте.
+# Вето сильнее: если сработали оба - остаётся pred=0.
+def strict_positive_mask(df: pd.DataFrame) -> np.ndarray:
+    from src.rule_features import (
+        _STRICT_FLAME_POSITIVE_RE,
+        FLAMMABLE_CATEGORY,
+        normalize_text,
+    )
+
+    mask = np.zeros(len(df), dtype=bool)
+    for i, (_, row) in enumerate(df.iterrows()):
+        if str(row.get("category", "")) != FLAMMABLE_CATEGORY:
+            continue
+        text = f"{normalize_text(row.get('name'))} {normalize_text(row.get('description'))}"
+        if _STRICT_FLAME_POSITIVE_RE.search(text):
             mask[i] = True
     return mask
