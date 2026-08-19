@@ -80,8 +80,8 @@ for k, i in enumerate(valid_rows):
 print(f"dHash-256 посчитан для {len(valid_rows)} ({time.time()-t2:.0f}c)")
 
 t3 = time.time()
-# брутфорс по Хэммингу на numpy: блоками, XOR + popcount через таблицу
-POP = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(1).astype(np.uint8)
+# брутфорс по Хэммингу на numpy: блоками, XOR + аппаратный popcount
+# (np.bitwise_count = инструкция POPCNT/CNT, ~5x быстрее lookup-таблицы)
 THRESH = 6
 pairs = 0
 B = 512
@@ -90,7 +90,7 @@ for s in range(0, len(hs), B):
     # (B, N, 32) слишком жирно -> сравниваем блок со всеми след. строками кусками
     for s2 in range(s, len(hs), B):
         blk2 = hs[s2:s2+B]
-        d = POP[blk[:, None, :] ^ blk2[None, :, :]].sum(axis=2)
+        d = np.bitwise_count(blk[:, None, :] ^ blk2[None, :, :]).sum(axis=2, dtype=np.uint16)
         ii, jj = np.where(d <= THRESH)
         for a, b in zip(ii, jj):
             ga, gb = valid_rows[s + a], valid_rows[s2 + b]
