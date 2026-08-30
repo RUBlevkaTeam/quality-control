@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "categories": {
+    "Легковоспламеняющиеся": {
+      "cos_thr": 0.98,
+      "k": 5,
+      "min_agree": 1
+    }
+  }
+}

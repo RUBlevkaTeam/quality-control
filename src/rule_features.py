@@ -57,16 +57,30 @@ def normalized_full_text(name: object, description: object) -> str:
     return f"{normalize_text(name)}\x1f{normalize_text(description)}"
 
 
-def build_model_text(name: object, description: object) -> str:
+def build_model_text(name: object, description: object, ocr: object = "") -> str:
     """Build field-aware input, intentionally giving the title extra weight."""
 
     title = normalize_text(name)
     body = normalize_text(description)
-    return f"название {title} название {title} описание {body}"
+    text = f"название {title} название {title} описание {body}"
+    ocr_text = normalize_text(ocr) if ocr else ""
+    if ocr_text:
+        text += f" изображение {ocr_text}"
+    return text
 
 
-def build_model_texts(names: Iterable[object], descriptions: Iterable[object]) -> list[str]:
-    return [build_model_text(name, description) for name, description in zip(names, descriptions)]
+def build_model_texts(
+    names: Iterable[object],
+    descriptions: Iterable[object],
+    ocrs: Iterable[object] | None = None,
+) -> list[str]:
+    name_list = list(names)
+    if ocrs is None:
+        ocrs = [""] * len(name_list)
+    return [
+        build_model_text(name, description, ocr)
+        for name, description, ocr in zip(name_list, descriptions, ocrs)
+    ]
 
 
 # The rule bank is intentionally compact.  It adds relational signals that a
@@ -290,7 +304,7 @@ def rule_feature_matrix(
 ) -> np.ndarray:
     if not (len(names) == len(descriptions) == len(categories)):
         raise ValueError("names, descriptions and categories must have equal length")
-    if not names:
+    if len(names) == 0:
         return np.empty((0, len(RULE_FEATURE_NAMES)), dtype=np.float32)
     return np.vstack(
         [
@@ -330,3 +344,72 @@ def evidence_flags(name: object, description: object) -> dict[str, bool]:
         "designed_for": bool(_DESIGNED_FOR_RE.search(text)),
         "built_in": bool(_BUILT_IN_RE.search(text)),
     }
+
+
+# Организаторы оценивают генерацию вручную и требуют подсвечивать конкретные
+# места карточки, а не писать «найдены признаки нарушений». Регулярки уже
+# знают, какая фраза сработала - возвращаем её с контекстом, чтобы LLM
+# цитировала товар, а не пересказывала правило.
+_QUOTE_SOURCES = {
+    "БАД": (
+        ("маркировка БАД", _BAD_MARKER_RE),
+        ("отрицание БАД", _BAD_NEGATION_RE),
+        ("спортивное питание", _SPORTS_RE),
+        ("пустая тара", _EMPTY_SUPPLEMENT_CONTAINER_RE),
+    ),
+    "Легковоспламеняющиеся": (
+        ("горючее или пиротехника", _FLAME_STANDALONE_RE),
+        # «не входит» ищем ДО «топливо»: подавление конфликтов работает только
+        # против ярлыков, найденных позже (ревью 29.08 — иначе в промпт уходила
+        # цитата «газовый баллон» (топливо) при вердикте «не относится»)
+        ("топливо не входит", _ABSENT_RE),
+        ("топливо", _FLAME_FUEL_RE),
+        ("входит в комплект", _INCLUDED_RE),
+        ("устройство", _FLAME_DEVICE_RE),
+    ),
+}
+_QUOTE_CONTEXT_WORDS = 3
+# Взаимоисключающие ярлыки: «в комплект НЕ входит» цепляет и отрицание,
+# и включение - они стоят рядом, а не пересекаются, поэтому нужен явный запрет.
+_QUOTE_CONFLICTS = {"топливо не входит": {"входит в комплект", "топливо"}}
+
+
+def evidence_quotes(
+    name: object, description: object, category: object, limit: int = 2
+) -> list[tuple[str, str]]:
+    """Конкретные фразы из карточки, на которых сработали правила.
+
+    Возвращает [(ярлык, цитата)]. Источники отбираются по категории: без
+    этого «болезней печени» в БАД матчится с паттерном устройств («печ\\w*»).
+    """
+    sources = _QUOTE_SOURCES.get(str(category))
+    if not sources:
+        return []
+    text = normalize_text(f"{safe_text(name)} {safe_text(description)}")
+    if not text:
+        return []
+    words = text.split()
+    found: list[tuple[str, str]] = []
+    # Пересекающиеся совпадения дают противоречивые подсказки: «в комплект
+    # не входит» цепляет и _ABSENT_RE, и _INCLUDED_RE. Побеждает первый
+    # источник в списке - они упорядочены от специфичного к общему.
+    taken: list[tuple[int, int]] = []
+    for label, pattern in sources:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        start_word = len(text[: match.start()].split())
+        end_word = len(text[: match.end()].split())
+        if any(label in _QUOTE_CONFLICTS.get(seen_label, ()) for seen_label, _ in found):
+            continue
+        lo = max(0, start_word - _QUOTE_CONTEXT_WORDS)
+        hi = min(len(words), end_word + _QUOTE_CONTEXT_WORDS)
+        # сравниваем диапазоны С контекстом: соседние совпадения дают
+        # одинаковые цитаты и засоряют подсказку повтором
+        if any(lo < prev_hi and hi > prev_lo for prev_lo, prev_hi in taken):
+            continue
+        taken.append((lo, hi))
+        found.append((label, " ".join(words[lo:hi])))
+        if len(found) >= limit:
+            break
+    return found

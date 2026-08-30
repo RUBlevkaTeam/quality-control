@@ -10,7 +10,8 @@ import pandas as pd
 from PIL import Image
 
 ROOT = Path("/Users/ashotmirzoyan/Documents/quality-control")
-OUT = Path(__file__).parent / "families.csv"
+# в КОРЕНЬ репо: все потребители (text_model, blend-скрипты) читают оттуда
+OUT = Path(__file__).resolve().parents[1] / "families.csv"
 
 # --- union-find ---
 class DSU:

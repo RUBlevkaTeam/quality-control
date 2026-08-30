@@ -59,3 +59,44 @@ podchet.py
 /cache/
 /native/libhashmatch_darwin_*.dylib
 /ECUP_QUALITY_AGENT_BUNDLE/
+siglip*.npy
+e5_embeddings.npy
+models/
+dino_*.npy
+kaggle_upload/
+images_small/
+images_small.zip
+kaggle_images/
+kaggle_images.zip
+families_family_backup.csv
+
+# --- Тяжёлые артефакты и данные: код-only PR, всё регенерируется скриптами ---
+# Сборочный выхлоп (build_submit.py)
+submit*.zip
+qc_pack/
+qc_pack.zip
+
+# Данные и картинки
+images/
+kaggle_images/
+kaggle_images.zip
+*.jsonl
+
+# Обученные/эмбеддинг-артефакты (регенерируются train_lora_qc / embed_* / build_*)
+qc_lora_adapter/
+qc_lora_*/
+knn_transfer.npz
+*.npy
+catboost_info/
+
+# Дампы OOF и логи экспериментов
+reports/*.log
+reports/*_oof*.csv
+text_strict_oof_*.csv
+families_strict.csv
+
+# Kaggle-ноутбуки и разведочные материалы вне PR
+notebooks/
+HANDOFF.md
+reports/conflict_queue.csv
+reports/ocr_pilot_bad_ids.csv

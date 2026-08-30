@@ -1,0 +1,13 @@
+{
+  "word_ngram_max":2.0,
+  "word_min_df":6.0,
+  "word_max_features":100000.0,
+  "rule_weight":0.6599810761,
+  "title_repeats":2.0,
+  "char_ngram_min":3.0,
+  "char_min_df":4.0,
+  "char_max_features":160000.0,
+  "char_ngram_width":2.0,
+  "C":29.5799782876,
+  "pos_weight":95.6909932165
+}
