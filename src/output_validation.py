@@ -14,8 +14,9 @@ import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
-MIN_COMMENT_LEN = 50
-MAX_COMMENT_LEN = 300
+# лимиты - из констант, чтобы форматтер (utils_postprocess) и валидатор
+# физически не могли разойтись
+from src.constants import MAX_COMMENT_LEN, MIN_COMMENT_LEN
 
 _RESULT_RE = re.compile(
     r"^<комментарий>(?P<comment>.*?)<вердикт>(?P<verdict>бан|не бан)$",

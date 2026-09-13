@@ -2,7 +2,6 @@
 import os as _os
 _os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
-import gc
 import sys
 from typing import List
 
@@ -13,12 +12,20 @@ from PIL import Image
 from transformers import AutoProcessor, AutoModel
 
 from src.constants import EMBEDDING_DIM
+from src.device import (
+    describe,
+    free_memory,
+    select_device,
+    select_dtype,
+)
+
+def _log(message: str) -> None:
+    print(f"[embed] {message}", file=sys.stderr, flush=True)
+
 
 # перед повторной попыткой кэш надо отдать, иначе второй OOM почти гарантирован
-def _free_cuda() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+def _free_cuda(device: str | None = None) -> None:
+    free_memory(device)
 
 
 # Qwen-specific util to resize image so that w*h <= max_pixels, keeping 28-pixel grid alignment
@@ -100,19 +107,20 @@ def embed_data_cuda(
     if len(df) == 0:
         return np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
 
-    # Aggressively free memory before loading model
-    torch.cuda.empty_cache()
-    if torch.cuda.is_available():
+    # cuda -> mps -> cpu: в контейнере всегда cuda, mps нужен для локальных
+    # прогонов на макбуке (отладка пайплайна без аренды сервера)
+    device = select_device()
+    free_memory(device)
+    if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _log(f"устройство: {describe(device)}")
 
     # Проверка идёт офлайн: опечатка в пути должна падать сразу, а не
     # превращаться в попытку сходить в интернет и зависнуть на таймауте.
     processor = AutoProcessor.from_pretrained(embed_model_path, local_files_only=True)
     model = AutoModel.from_pretrained(
         embed_model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=select_dtype(device),
         local_files_only=True,
         trust_remote_code=True,
     )
@@ -169,7 +177,7 @@ def embed_data_cuda(
             except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
                 # ValueError/RuntimeError ловим не зря: рассинхрон image-токенов
                 # при truncation приходит именно так, а не как OOM
-                _free_cuda()
+                _free_cuda(device)
                 emb_with_list = []
                 for idx in range(len(df_with_imgs)):
                     single_imgs = all_images[idx]
@@ -188,7 +196,7 @@ def embed_data_cuda(
                         emb_with_list.append(single_emb[0])
                     except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
                         # последний рубеж: считаем товар только по тексту
-                        _free_cuda()
+                        _free_cuda(device)
                         single_emb = _embed_batch_text_only(
                             processor, model,
                             [texts_with_imgs[idx]],
@@ -212,7 +220,7 @@ def embed_data_cuda(
             except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
                 # у текстовой группы фоллбэка не было вовсе - один длинный
                 # текст мог уронить весь прогон
-                _free_cuda()
+                _free_cuda(device)
                 emb_text_list = []
                 for text in texts_only:
                     try:
@@ -220,7 +228,7 @@ def embed_data_cuda(
                             _embed_batch_text_only(processor, model, [text], device)[0]
                         )
                     except (torch.cuda.OutOfMemoryError, ValueError, RuntimeError):
-                        _free_cuda()
+                        _free_cuda(device)
                         emb_text_list.append(np.zeros(EMBEDDING_DIM, dtype=np.float32))
 
         # Assemble batch_result using list of 1-D arrays, then vstack at end
@@ -244,9 +252,8 @@ def embed_data_cuda(
             all_embeddings = np.concatenate([all_embeddings, batch_result], axis=0)
 
     del model, processor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    free_memory(device)
+    if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
     # fp16 может переполниться и дать inf/NaN. Дальше это уронило бы весь прогон

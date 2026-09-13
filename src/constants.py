@@ -17,7 +17,10 @@ MAX_PROMPT_TOKENS = 4096
 # Default inference batch sizes tuned for H100 80GB
 # Если будем запускать на макбуках, то надо будет уменьшить
 DEFAULT_EMBED_BATCH_SIZE = 128
-DEFAULT_LLM_BATCH_SIZE = 64
+# 64 подбирался под короткие промпты; few-shot добавил ~5-6k токенов префилла
+# на товар, и при 64 KV-кэш ~56 ГБ не влезает в H100 80 ГБ контейнера.
+# 32 замерено на сервере 29.08: 0.31 с/товар, ~19 мин на 3800, KV ~28 ГБ.
+DEFAULT_LLM_BATCH_SIZE = 32
 
 # Classifier artifact path (relative to submit root)
 _ARTIFACT_REL = "baseline_qwen3vl_bf16.joblib"
@@ -41,6 +44,11 @@ VERDICT_FOR_NEGATIVE = "бан"      # pred == 0
 
 MIN_COMMENT_LEN = 50
 MAX_COMMENT_LEN = 300
+
+# VLM-OCR на инференсе: лимит визуальных токенов (тот же, что в офлайн-билдере),
+# бюджет времени на транскрипцию и окно неуверенности для гейта.
+DEFAULT_OCR_MAX_PIXELS = 512 * 28 * 28
+OCR_TIME_BUDGET_SECONDS = 600.0
 MIN_COMMENT_FILLER = " Вердикт основан на данных карточки товара."
 MISSING_COMMENT_PLACEHOLDER = (
     "Вердикт вынесен по названию, описанию и изображениям товара "

@@ -45,6 +45,17 @@ _RICH_MODE = "word_char_title_rules"
 # категории (0.797 -> 0.818).
 _TITLE_REPEATS = 3
 
+# e5-канал: второй, ортогональный голос. Соло слабее TF-IDF, но ошибается в
+# других местах. Family-фолды, 4 сида: fire 0.7986 -> 0.8046 (+0.0061),
+# у БАД канал ничего не дал (-0.0004), поэтому включён только для fire.
+# ВЫКЛЮЧЕН. Прирост OOF +0.011 оказался артефактом подбора порога, а не
+# лучшего ранжирования: на OOF канал переворачивает 5 вердиктов из 3910
+# (~1 товар на public), при этом весит 1.1 ГБ архива. Сабмит с ним:
+# 0.77248 -> 0.76204. Код оставлен как задокументированный отрицательный
+# результат; чтобы включить - вернуть FLAMMABLE_CATEGORY в _E5_CATEGORIES.
+_E5_WEIGHT = 0.5
+_E5_CATEGORIES = ()
+
 # Полный двусторонний memory-lookup (текст/SHA/dHash). Выключен для
 # изоляционного замера: сабмит со всеми слоями дал 0.77196 против 0.77329
 # у базы, а это единственный компонент без OOF-замера (групповые фолды его
@@ -152,6 +163,7 @@ class TextQualityModel:
         n_splits: int = 5,
         random_state: int = 42,
         extra_threshold_seeds: Sequence[int] = (3030, 3031, 3032),
+        e5_model_path: str | None = None,
     ) -> Dict[str, dict]:
         """families: Series id -> family. С ней фолды режутся по семействам
         почти-дублей (53% товаров в семействах!) - без этого OOF завышен:
@@ -183,10 +195,32 @@ class TextQualityModel:
                 cv = StratifiedKFold(splits, shuffle=True, random_state=random_state)
                 folds = list(cv.split(subset, y))
 
-            best = None
-            for C in c_grid:
-                oof = np.zeros(len(y), dtype=np.float64)
-                for tr, va in folds:
+            # e5-эмбеддинги нужны только там, где канал что-то даёт (fire);
+            # считаются один раз на категорию и переиспользуются по всем фолдам
+            e5_matrix = None
+            if self._uses_e5(category) and e5_model_path is not None:
+                try:
+                    from src.e5_channel import build_e5_texts, encode
+
+                    e5_matrix = encode(build_e5_texts(subset), e5_model_path)
+                    _log(f"{category}: e5-эмбеддинги {e5_matrix.shape}")
+                except Exception as exc:
+                    _log(f"{category}: e5-канал недоступен ({type(exc).__name__}: {exc})")
+
+            def oof_for(seed: int, C: float):
+                """OOF-вероятности для сида: базовые признаки, при наличии
+                e5 - логит-смесь. Порог обязан считаться на том же, что
+                увидит инференс, иначе он не соответствует предсказаниям."""
+                if fam_by_id is not None:
+                    cv_seed = StratifiedGroupKFold(splits, shuffle=True, random_state=seed)
+                    split = list(cv_seed.split(subset, y, groups))
+                else:
+                    cv_seed = StratifiedKFold(splits, shuffle=True, random_state=seed)
+                    split = list(cv_seed.split(subset, y))
+
+                base = np.zeros(len(y), dtype=np.float64)
+                e5_oof = np.zeros(len(y), dtype=np.float64) if e5_matrix is not None else None
+                for tr, va in split:
                     features = self._make_feature_bundle(category)
                     x_tr = self._build_category_features(
                         category, features, subset.iloc[tr], fit=True
@@ -196,8 +230,22 @@ class TextQualityModel:
                     )
                     clf = self._make_classifier(category, C)
                     clf.fit(x_tr, y[tr])
-                    oof[va] = clf.predict_proba(x_va)[:, 1]
-                f1, threshold = exact_best_threshold(oof, y)
+                    base[va] = clf.predict_proba(x_va)[:, 1]
+
+                    if e5_matrix is not None:
+                        head = self._make_e5_head()
+                        head.fit(e5_matrix[tr], y[tr])
+                        e5_oof[va] = head.predict_proba(e5_matrix[va])[:, 1]
+
+                if e5_oof is None:
+                    return base
+                from src.e5_channel import blend_logits
+
+                return blend_logits(base, e5_oof, _E5_WEIGHT)
+
+            best = None
+            for C in c_grid:
+                f1, threshold = exact_best_threshold(oof_for(random_state, C), y)
                 if best is None or f1 > best["oof_f1"]:
                     best = {"oof_f1": f1, "threshold": threshold, "C": C}
 
@@ -211,20 +259,7 @@ class TextQualityModel:
                 thresholds = [best["threshold"]]
                 f1s = [best["oof_f1"]]
                 for seed in extra_threshold_seeds:
-                    cv2 = StratifiedGroupKFold(splits, shuffle=True, random_state=seed)
-                    oof2 = np.zeros(len(y), dtype=np.float64)
-                    for tr, va in cv2.split(subset, y, groups):
-                        features = self._make_feature_bundle(category)
-                        x_tr = self._build_category_features(
-                            category, features, subset.iloc[tr], fit=True
-                        )
-                        x_va = self._build_category_features(
-                            category, features, subset.iloc[va], fit=False
-                        )
-                        clf = self._make_classifier(category, best["C"])
-                        clf.fit(x_tr, y[tr])
-                        oof2[va] = clf.predict_proba(x_va)[:, 1]
-                    f1_2, thr_2 = exact_best_threshold(oof2, y)
+                    f1_2, thr_2 = exact_best_threshold(oof_for(seed, best["C"]), y)
                     thresholds.append(thr_2)
                     f1s.append(f1_2)
                 best["threshold"] = float(np.median(thresholds))
@@ -246,10 +281,16 @@ class TextQualityModel:
             # на train точность 0.9992. Хранится опциональным полем.
             memory = RetrievalMemory().fit(subset)
 
+            e5_head = None
+            if e5_matrix is not None:
+                e5_head = self._make_e5_head()
+                e5_head.fit(e5_matrix, y)
+
             self.category_models[category] = {
                 "feature_mode": self._feature_mode(category),
                 "features": features,
                 "memory": memory,
+                "e5_head": e5_head,
                 "classifier": classifier,
                 "threshold": best["threshold"],
                 "C": best["C"],
@@ -259,7 +300,7 @@ class TextQualityModel:
             }
             report[category] = {
                 k: v for k, v in self.category_models[category].items()
-                if k not in ("features", "classifier", "memory")
+                if k not in ("features", "classifier", "memory", "e5_head")
             }
             _log(
                 f"{category}: OOF F1={best['oof_f1']:.4f}, порог={best['threshold']:.4f}, "
@@ -345,22 +386,46 @@ class TextQualityModel:
     def _make_classifier(category: object, C: float):
         from sklearn.linear_model import LogisticRegression
 
-        kwargs = {
-            "C": C,
-            "max_iter": 2000,
-            "class_weight": "balanced",
-        }
-        if str(category) == FLAMMABLE_CATEGORY:
-            # фиксированный вес позитива 40 вместо balanced (~13.7): меняет
-            # ранжирование редких позитивов, порог после этого отделяет
-            # уверенные fire-товары чище. Family-folds по 4 seed:
-            # fire-F1 0.79267 -> 0.79757, улучшение на каждом seed.
-            kwargs.update(
-                solver="liblinear",
-                random_state=2026,
-                class_weight={0: 1, 1: 40},
+        if str(category) != FLAMMABLE_CATEGORY:
+            # БАД: логрег. Пробовали калиброванный LinearSVC - на family-OOF
+            # он выигрывал стабильно (0.9370 -> 0.9407 на всех 4 сидах), но
+            # менял ~17 вердиктов на public, и сабмит просел 0.77248 -> 0.76204.
+            # Разделить "объективно хуже" и "не повезло с 17 товарами" одним
+            # публичным замером нельзя, поэтому остаёмся на проверенном.
+            return LogisticRegression(
+                C=C, max_iter=2000, class_weight="balanced",
             )
-        return LogisticRegression(**kwargs)
+
+        # fire: фиксированный вес позитива 40 вместо balanced (~13.7). Меняет
+        # ранжирование редких позитивов, порог после этого отделяет уверенные
+        # fire-товары чище. Family-folds по 4 сидам: 0.79267 -> 0.79757.
+        return LogisticRegression(
+            C=C,
+            max_iter=2000,
+            solver="liblinear",
+            random_state=2026,
+            class_weight={0: 1, 1: 40},
+        )
+
+    @staticmethod
+    def _uses_e5(category: object) -> bool:
+        return str(category) in _E5_CATEGORIES
+
+    # эмбеддинги считаются один раз на подвыборку категории
+    @staticmethod
+    def _e5_head_probs(head, sub: pd.DataFrame, e5_model_path):
+        from src.e5_channel import build_e5_texts, encode
+
+        if e5_model_path is None:
+            raise ValueError("путь к e5-модели не задан")
+        matrix = encode(build_e5_texts(sub), e5_model_path)
+        return head.predict_proba(matrix)[:, 1]
+
+    @staticmethod
+    def _make_e5_head():
+        from sklearn.linear_model import LogisticRegression
+
+        return LogisticRegression(C=3.0, max_iter=3000, class_weight="balanced")
 
     # ------------------------------------------------------------------
     # инференс
@@ -368,7 +433,9 @@ class TextQualityModel:
 
     # Никогда не бросает исключение: незнакомая категория или пустой вход
     # деградируют до prob=0/pred=0, потому что упавший прогон стоит дороже.
-    def predict(self, df: pd.DataFrame) -> Tuple[List[float], List[int]]:
+    def predict(
+        self, df: pd.DataFrame, e5_model_path: str | None = None
+    ) -> Tuple[List[float], List[int]]:
         n = len(df)
         probs = np.zeros(n, dtype=np.float64)
         preds = np.zeros(n, dtype=np.int64)
@@ -395,6 +462,22 @@ class TextQualityModel:
                 info["feature_mode"], info["features"], sub, fit=False
             )
             block = info["classifier"].predict_proba(matrix)[:, 1]
+
+            # e5-канал: второй голос, ортогональный TF-IDF. Порог в артефакте
+            # подобран на СМЕШАННЫХ вероятностях, поэтому при сбое канала
+            # предсказания поедут по другой шкале - логируем это явно.
+            e5_head = info.get("e5_head")
+            if e5_head is not None:
+                try:
+                    from src.e5_channel import blend_logits, build_e5_texts, encode
+
+                    e5_probs = self._e5_head_probs(e5_head, sub, e5_model_path)
+                    block = blend_logits(block, e5_probs, _E5_WEIGHT)
+                except Exception as exc:
+                    _log(
+                        f"e5-канал не отработал ({type(exc).__name__}: {exc}); "
+                        "остаёмся на текстовой модели, порог рассчитан на смеси"
+                    )
 
             # retrieval-память: точное совпадение с train перекрывает модель
             memory = info.get("memory")
@@ -460,6 +543,14 @@ class TextQualityModel:
                 f"словарь {vocab}, OOF {info.get('oof_f1', 0):.3f}"
             )
         return "; ".join(parts)
+
+    def thresholds(self) -> Dict[str, float]:
+        """Порог по нормализованному ключу категории - для гейта OCR."""
+
+        return {
+            _norm_category(name): float(info["threshold"])
+            for name, info in self.category_models.items()
+        }
 
     # ------------------------------------------------------------------
     # сериализация
@@ -541,8 +632,10 @@ def _main(argv: Sequence[str]) -> None:
         mask = df["id"].isin(fix)
         df.loc[mask, "label"] = df.loc[mask, "id"].map(fix)
         _log(f"применено {int(mask.sum())} правок разметки из {argv[3]}")
+    e5_dir = Path(__file__).resolve().parent.parent / "models" / "multilingual-e5-base"
     model = CanonicalTextQualityModel()
-    model.train(df, families=families)
+    model.train(df, families=families,
+                e5_model_path=str(e5_dir) if e5_dir.exists() else None)
     model.save(out_path)
     _log(f"артефакт сохранён: {out_path}")
 

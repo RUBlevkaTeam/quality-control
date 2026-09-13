@@ -1,0 +1,7 @@
+{
+  "word_ngram_max":3.0,
+  "word_min_df":4.0,
+  "word_max_features":null,
+  "rule_weight":0.6155292814,
+  "C":20.8948771452
+}
